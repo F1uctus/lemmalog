@@ -31,6 +31,40 @@ use std::io::{BufRead, Write};
 
 struct State {
     memory: AgentMemory<lemmalog::agent::MockExtractor>,
+    /// (mtime_ns, len) of the snapshot as this process last saw it. One
+    /// snapshot is routinely shared by several agents; the server holds the
+    /// whole memory in RAM and `save` rewrites the file wholesale, so a
+    /// second writer would silently erase the first one's work. We refuse
+    /// instead, and park our version beside it.
+    seen: Option<(u128, u64)>,
+}
+
+fn fingerprint(path: &str) -> Option<(u128, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((t.as_nanos(), m.len()))
+}
+
+/// Save unless the file moved under us. On conflict the caller's memory is
+/// written to a sibling `.conflict-<pid>` file and the reason is returned, so
+/// nothing is lost and nothing is overwritten.
+fn guarded_save(state: &mut State, path: &str) -> Result<String, String> {
+    let on_disk = fingerprint(path);
+    if on_disk.is_some() && state.seen.is_some() && on_disk != state.seen {
+        let parked = format!("{path}.conflict-{}", std::process::id());
+        let detail = match state.memory.save(&parked) {
+            Ok(_) => format!("your version is parked at {parked}"),
+            Err(e) => format!("and parking it also failed: {e}"),
+        };
+        return Err(format!(
+            "conflict: {path} changed on disk since this server read it — another agent or session \
+             has written to the same memory. Refusing to overwrite it; {detail}. Re-read the \
+             snapshot (restart this server) and re-apply your observations."
+        ));
+    }
+    state.memory.save(path).map_err(|e| format!("io: snapshot save failed: {e}"))?;
+    state.seen = fingerprint(path);
+    Ok(format!("saved to {path}"))
 }
 
 fn main() {
@@ -45,7 +79,10 @@ fn main() {
             }
         }
     }
-    let mut state = State { memory };
+    let mut state = State {
+        memory,
+        seen: path.as_deref().and_then(fingerprint),
+    };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -609,10 +646,7 @@ fn tool_call(state: &mut State, name: &str, args: &J, path: Option<&str>) -> Res
             let p = path.ok_or_else(|| {
                 "input: LEMMALOG_MCP_PATH not set — register the server with --env LEMMALOG_MCP_PATH=...".to_string()
             })?;
-            match state.memory.save(p) {
-                Ok(_) => Ok(format!("saved to {p}")),
-                Err(e) => Err(format!("io: snapshot save failed: {e}")),
-            }
+            guarded_save(state, p)
         }
         "lemmalog_run" => {
             sync_clock(state);
@@ -679,7 +713,14 @@ fn tool_call(state: &mut State, name: &str, args: &J, path: Option<&str>) -> Res
         )
     {
         if let Some(p) = path {
-            let _ = state.memory.save(p);
+            if let Err(e) = guarded_save(state, p) {
+                // The mutation succeeded in memory but is not on disk. Say so
+                // in the same result rather than reporting a clean success.
+                return Ok(json!({
+                    "content": [{"type": "text", "text": format!("{text}\n\nNOT PERSISTED — {e}")}],
+                    "isError": true
+                }));
+            }
         }
     }
     Ok(json!({

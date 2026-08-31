@@ -80,3 +80,38 @@ fn second_writer_is_refused_not_silently_merged() {
     a.child.kill().ok();
     b.child.kill().ok();
 }
+
+#[test]
+fn server_started_without_a_snapshot_does_not_flatten_one_that_appears() {
+    // The (mtime, len) guard skipped this case entirely: a server that came up
+    // before the snapshot existed had `seen == None`, so its first save
+    // overwrote whatever another agent had created in the meantime. That is
+    // how a session can silently lose rule batches it never knew about.
+    let dir = std::env::temp_dir().join("lemmalog-mcp-appear");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("mem-{}.snapshot", std::process::id()));
+    let path = path.to_str().unwrap().to_string();
+    let _ = std::fs::remove_file(&path);
+
+    // A starts with no file on disk.
+    let mut a = srv(&path);
+
+    // B creates the snapshot in the meantime.
+    let mut b = srv(&path);
+    b.observe("other_agent --wrote--> important");
+    b.child.kill().ok();
+    assert!(std::fs::read_to_string(&path).unwrap().contains("other_agent"));
+
+    // A must now refuse rather than replace B's file.
+    let ra = a.observe("late_starter --wrote--> mine");
+    assert!(
+        ra.contains("NOT PERSISTED"),
+        "a server that started before the file existed must not overwrite it: {ra}"
+    );
+
+    let disk = std::fs::read_to_string(&path).unwrap();
+    assert!(disk.contains("other_agent"), "the earlier writer's work must survive");
+    assert!(!disk.contains("late_starter"), "the late starter must not have clobbered it");
+
+    a.child.kill().ok();
+}

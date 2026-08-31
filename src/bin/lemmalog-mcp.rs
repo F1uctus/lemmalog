@@ -36,13 +36,24 @@ struct State {
     /// whole memory in RAM and `save` rewrites the file wholesale, so a
     /// second writer would silently erase the first one's work. We refuse
     /// instead, and park our version beside it.
-    seen: Option<(u128, u64)>,
+    seen: Option<u64>,
 }
 
-fn fingerprint(path: &str) -> Option<(u128, u64)> {
-    let m = std::fs::metadata(path).ok()?;
-    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some((t.as_nanos(), m.len()))
+/// Content digest of the snapshot, or `None` when the file does not exist.
+///
+/// Deliberately hashes the bytes rather than trusting (mtime, len): two
+/// different memories can share a length, and filesystem timestamp
+/// granularity is coarse enough that a fast rewrite can go unnoticed.
+/// Snapshots are a few hundred KB, so this costs nothing.
+fn fingerprint(path: &str) -> Option<u64> {
+    let bytes = std::fs::read(path).ok()?;
+    // FNV-1a: no dependency, and there is no adversary here — only races.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in &bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    Some(h)
 }
 
 /// Save unless the file moved under us. On conflict the caller's memory is
@@ -50,7 +61,10 @@ fn fingerprint(path: &str) -> Option<(u128, u64)> {
 /// nothing is lost and nothing is overwritten.
 fn guarded_save(state: &mut State, path: &str) -> Result<String, String> {
     let on_disk = fingerprint(path);
-    if on_disk.is_some() && state.seen.is_some() && on_disk != state.seen {
+    // `seen == None` means this server started with no snapshot on disk. If one
+    // exists now, somebody else created it and we must not flatten it — the
+    // old check skipped that case entirely and would overwrite it silently.
+    if on_disk != state.seen {
         let parked = format!("{path}.conflict-{}", std::process::id());
         let detail = match state.memory.save(&parked) {
             Ok(_) => format!("your version is parked at {parked}"),

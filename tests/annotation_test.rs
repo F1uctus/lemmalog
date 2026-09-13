@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use lemmalog::{eval::Key, AggFn, Annotation, Engine, Value};
+use lemmalog::{eval::Key, AggFn, Annotation, ClauseId, Engine, Value};
 
 /// A carrier that counts the body atoms multiplied into an annotation and
 /// records every derivation stamped onto it, and that **deliberately
@@ -24,13 +24,19 @@ use lemmalog::{eval::Key, AggFn, Annotation, Engine, Value};
 #[derive(Debug, Clone, PartialEq)]
 struct Tally {
     atoms: u32,
-    derivations: BTreeSet<String>,
+    /// What `times` and `negate` folded in. Kept apart from `derivations` so
+    /// that counting derivations counts derivations.
+    marks: BTreeSet<String>,
+    /// One entry per derivation the evaluator stamped, as the carrier sees it:
+    /// the clause identity it was handed, and that firing's body predicates.
+    derivations: BTreeSet<(ClauseId, String)>,
 }
 
 impl Annotation for Tally {
     fn one() -> Self {
         Tally {
             atoms: 0,
+            marks: BTreeSet::new(),
             derivations: BTreeSet::new(),
         }
     }
@@ -38,7 +44,8 @@ impl Annotation for Tally {
     fn zero() -> Self {
         Tally {
             atoms: 0,
-            derivations: BTreeSet::from(["<zero>".to_owned()]),
+            marks: BTreeSet::from(["<zero>".to_owned()]),
+            derivations: BTreeSet::new(),
         }
     }
 
@@ -51,6 +58,7 @@ impl Annotation for Tally {
 
         Tally {
             atoms: self.atoms + other.atoms,
+            marks: self.marks.union(&other.marks).cloned().collect(),
             derivations: self
                 .derivations
                 .union(&other.derivations)
@@ -62,6 +70,7 @@ impl Annotation for Tally {
     fn plus(&self, other: &Self) -> Self {
         Tally {
             atoms: self.atoms.max(other.atoms),
+            marks: self.marks.union(&other.marks).cloned().collect(),
             derivations: self
                 .derivations
                 .union(&other.derivations)
@@ -70,10 +79,25 @@ impl Annotation for Tally {
         }
     }
 
-    fn derive(mut self, rule: &str, body: &[Key]) -> Self {
+    /// Reads the complement instead of pruning, the way a two-value carrier
+    /// does: a blocked route still exists, still fires, and still stamps its
+    /// own derivation. The trait default prunes, which is what `Minimal`
+    /// below pins; this carrier deliberately does not, because a carrier that
+    /// prunes can never observe two clauses that differ only in a negation.
+    fn negate(found: Option<&Self>) -> Self {
+        match found {
+            None => Self::one(),
+            Some(_) => Tally {
+                atoms: 0,
+                marks: BTreeSet::from(["<blocked>".to_owned()]),
+                derivations: BTreeSet::new(),
+            },
+        }
+    }
+
+    fn derive(mut self, clause: ClauseId, body: &[Key]) -> Self {
         let preds: Vec<&str> = body.iter().map(|(pred, _)| pred.as_str()).collect();
-        self.derivations
-            .insert(format!("{rule}[{}]", preds.join(",")));
+        self.derivations.insert((clause, preds.join(",")));
 
         self
     }
@@ -187,15 +211,58 @@ fn a_carrier_the_evaluator_cannot_interpret_still_drives_the_whole_fixpoint() {
     // body and a mean over derivations becomes permutation-weighted. If a
     // future change sorts at the call site instead, this set collapses to one
     // entry and this assertion is what says so.
+    assert_eq!(fact.ann.atoms, 2);
     assert_eq!(
-        fact.ann,
-        Tally {
-            atoms: 2,
-            derivations: BTreeSet::from([
-                "place[hosted_by,runs_in]".to_owned(),
-                "place[runs_in,hosted_by]".to_owned(),
-            ]),
-        }
+        bodies(&fact.ann),
+        BTreeSet::from([
+            "hosted_by,runs_in".to_owned(),
+            "runs_in,hosted_by".to_owned()
+        ])
+    );
+    assert_eq!(
+        clauses(&fact.ann).len(),
+        1,
+        "one clause derived this fact, however many times it fired"
+    );
+}
+
+#[test]
+fn two_unnamed_clauses_of_one_head_are_two_derivations() {
+    // The shape the corpus actually has: no clause is named, and two clauses
+    // of one head differ only in which predicate they negate. The engine
+    // labels both `rule/safe`, and before the clause identity existed the
+    // carrier could not tell them apart - one derivation where there are two,
+    // which is the laundering direction under a mean.
+    let mut engine: Engine<Tally> = Engine::default();
+    engine
+        .install_program(
+            "safe(P) :- thing(P), !problem(P).\n\
+             safe(P) :- thing(P), !broken(P).",
+        )
+        .expect("the program parses");
+
+    let relay = engine.sym("relay");
+    engine.declare("thing", &[relay], Tally::base());
+    engine.declare("problem", &[relay], Tally::base());
+    engine.run();
+
+    let fact = engine
+        .fact("safe", &[relay])
+        .expect("both clauses derive safe(relay)");
+
+    assert!(
+        fact.ann.marks.contains("<blocked>"),
+        "the clause negating problem(relay) fired too, so both routes are in play"
+    );
+    assert_eq!(
+        bodies(&fact.ann),
+        BTreeSet::from(["thing".to_owned()]),
+        "a negated literal contributes no body key, by design"
+    );
+    assert_eq!(
+        clauses(&fact.ann).len(),
+        2,
+        "two clauses, two derivations - the label `rule/safe` cannot say so"
     );
 }
 
@@ -276,11 +343,22 @@ fn an_aggregate_head_tells_the_annotation_which_aggregate_it_is_folding() {
     );
 }
 
+/// The distinct clause identities that stamped this annotation.
+fn clauses(t: &Tally) -> BTreeSet<ClauseId> {
+    t.derivations.iter().map(|(c, _)| *c).collect()
+}
+
+/// The body predicate lists, one per firing the evaluator stamped.
+fn bodies(t: &Tally) -> BTreeSet<String> {
+    t.derivations.iter().map(|(_, b)| b.clone()).collect()
+}
+
 impl Tally {
     /// One base fact, as the caller asserts it.
     fn base() -> Self {
         Tally {
             atoms: 1,
+            marks: BTreeSet::new(),
             derivations: BTreeSet::new(),
         }
     }

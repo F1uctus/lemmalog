@@ -1,7 +1,7 @@
 //! The evaluation core: fact store, semiring annotations, stratification,
 //! seminaive fixpoint evaluation, and provenance tracking.
 
-use crate::ast::{Clause, CmpOp, Lit};
+use crate::ast::{Clause, ClauseId, CmpOp, Lit};
 use crate::intern::{AggFn, Interner, Term, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -111,6 +111,15 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
     /// Stamp a completed body product with the identity of the derivation
     /// that produced it, immediately before `plus` folds it into the head.
     ///
+    /// A derivation is identified by the pair `(clause, body)`. `clause` is a
+    /// [`ClauseId`], the clause's *content* identity, and deliberately not the
+    /// label `why()` prints: that label is `rule/<head predicate>` for every
+    /// unnamed clause, so two clauses of one head are indistinguishable by it.
+    /// The content identity also settles negation, which reaches the body
+    /// product as a factor but never reaches `body` as a key - two clauses
+    /// that differ only in which predicate they negate have different
+    /// [`ClauseId`]s and are therefore different derivations.
+    ///
     /// The default discards the identity, which is today's behaviour exactly.
     /// It exists because `plus` alone cannot tell "the same derivation found
     /// twice" from "two different derivations": the evaluator fires a rule
@@ -122,12 +131,12 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
     /// order, so the same logical derivation is delivered once per permutation,
     /// each time with a different `body` sequence. A carrier whose reading
     /// counts DISTINCT derivations must therefore **sort `body` itself** before
-    /// fingerprinting it, together with `rule`. Keying on the slice as received
+    /// fingerprinting it, together with `clause`. Keying on the slice as received
     /// counts one derivation once per permutation, which silently turns any
     /// average over derivations into a permutation-weighted one. Sorting is the
     /// carrier's obligation because it is the carrier that knows whether it
     /// needs the identity at all, and the default does not.
-    fn derive(self, _rule: &str, _body: &[Key]) -> Self {
+    fn derive(self, _clause: ClauseId, _body: &[Key]) -> Self {
         self
     }
 
@@ -1842,8 +1851,10 @@ impl<A: Annotation> Engine<A> {
             .clone()
             .unwrap_or_else(|| format!("rule/{}", clause.head.pred));
         // stamp the body product with this derivation's identity before it is
-        // summed into the head; the default impl is a no-op
-        let ann = env.ann.clone().derive(&rule, &env.body_keys);
+        // summed into the head; the default impl is a no-op. The identity is
+        // the clause's content, not `rule` - `rule` is the why() label, which
+        // is shared by every unnamed clause of one head predicate.
+        let ann = env.ann.clone().derive(clause.id(), &env.body_keys);
         let support = Support::Rule {
             rule,
             body: env.body_keys.clone(),

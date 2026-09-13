@@ -44,7 +44,7 @@ pub use agent::{
     assemble_context, AgentMemory, Episode, Extractor, IngestReport, LlmExtractor, MockExtractor,
     DEFAULT_RULES, EXTRACTION_PROMPT,
 };
-pub use ast::{parse_program, ParseError};
+pub use ast::{parse_program, ClauseId, ParseError};
 pub use eval::{Ann, Annotation, Change, Engine, Interpret, StoredFact, StratError};
 pub use intern::{AggFn, Interner, Term, Value};
 pub use retrieval::{Bm25, Retrieval, Selection};

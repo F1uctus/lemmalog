@@ -28,11 +28,8 @@ struct State {
 
 fn main() {
     let path = std::env::var("LEMMALOG_MCP_PATH").ok();
-    let mut memory = AgentMemory::new(
-        lemmalog::agent::MockExtractor::new(0.9),
-        "",
-    )
-    .expect("fresh memory");
+    let mut memory =
+        AgentMemory::new(lemmalog::agent::MockExtractor::new(0.9), "").expect("fresh memory");
     if let Some(p) = &path {
         if std::path::Path::new(p).exists() {
             match AgentMemory::load(lemmalog::agent::MockExtractor::new(0.9), p) {
@@ -49,7 +46,9 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<J>(&line) else { continue };
+        let Ok(msg) = serde_json::from_str::<J>(&line) else {
+            continue;
+        };
         let method = msg["method"].as_str().unwrap_or_default().to_string();
         let id = msg.get("id").cloned();
         if id.is_none() {
@@ -169,8 +168,12 @@ fn tool(name: &str, desc: &str, props: &[&str], required: &[&str]) -> J {
 /// names arrive ground regardless of case.
 fn parse_fact_atom(s: &str) -> Result<(String, Vec<String>), String> {
     let s = s.trim().trim_end_matches('.');
-    let open = s.find('(').ok_or_else(|| format!("expected pred(args): {s:?}"))?;
-    let close = s.rfind(')').ok_or_else(|| format!("expected pred(args): {s:?}"))?;
+    let open = s
+        .find('(')
+        .ok_or_else(|| format!("expected pred(args): {s:?}"))?;
+    let close = s
+        .rfind(')')
+        .ok_or_else(|| format!("expected pred(args): {s:?}"))?;
     if close <= open {
         return Err(format!("expected pred(args): {s:?}"));
     }
@@ -229,8 +232,8 @@ facts are current(S, rel, O). Try current(X, \"{pred}\", Y)"
         .relations
         .keys()
         .filter(|r| !r.starts_with("__") && stem(r) == stem(pred))
-        .cloned()
         .take(5)
+        .cloned()
         .collect();
     if similar.is_empty() {
         format!(
@@ -246,12 +249,7 @@ Asserted facts live under current(S, rel, O)",
     }
 }
 
-fn tool_call(
-    state: &mut State,
-    name: &str,
-    args: &J,
-    path: Option<&str>,
-) -> Result<J, String> {
+fn tool_call(state: &mut State, name: &str, args: &J, path: Option<&str>) -> Result<J, String> {
     // Input errors (bad goal syntax, rejected rules, unknown batch id)
     // return as tool results with isError: true so the model can
     // self-correct; JSON-RPC errors are reserved for unknown tools and
@@ -272,7 +270,10 @@ fn tool_call(
             mem.maintain(now);
             let mut out = format!(
                 "added={} updated={} noop={} escalations={}",
-                report.added, report.updated, report.noop, report.escalations.len()
+                report.added,
+                report.updated,
+                report.noop,
+                report.escalations.len()
             );
             for e in report.escalations.iter().take(3) {
                 out.push_str(&format!("\nescalation: {e}"));
@@ -289,11 +290,7 @@ fn tool_call(
                     dropped.len()
                 ));
                 for (line, reason) in dropped.iter().take(5) {
-                    out.push_str(&format!(
-                        "\n  `{}` — {}",
-                        truncate(line, 80),
-                        reason
-                    ));
+                    out.push_str(&format!("\n  `{}` — {}", truncate(line, 80), reason));
                 }
                 if dropped.len() > 5 {
                     out.push_str(&format!("\n  (+{} more)", dropped.len() - 5));
@@ -316,10 +313,7 @@ fn tool_call(
                     if died.is_empty() {
                         out.push_str("  no derived facts depended on them\n");
                     } else {
-                        out.push_str(&format!(
-                            "  {} derived fact(s) died:\n",
-                            died.len()
-                        ));
+                        out.push_str(&format!("  {} derived fact(s) died:\n", died.len()));
                         for d in died.iter().take(15) {
                             out.push_str(&format!("    {d}\n"));
                         }
@@ -370,9 +364,7 @@ fn tool_call(
                 if events.len() > shown {
                     out.push_str(&format!("(+{} more)\n", events.len() - shown));
                 }
-                out.push_str(&format!(
-                    "checkpoint: pass since={epoch} next time"
-                ));
+                out.push_str(&format!("checkpoint: pass since={epoch} next time"));
             }
             Ok(out)
         }
@@ -417,9 +409,7 @@ fn tool_call(
                         .collect();
                     Ok(state.memory.engine.why(&pred, &vals))
                 }
-                Err(e) => Err(format!(
-                    "input: {e}\nexample: reports_to(Alice, Carol)"
-                )),
+                Err(e) => Err(format!("input: {e}\nexample: reports_to(Alice, Carol)")),
             }
         }
         "lemmalog_install_rules" => {
@@ -476,7 +466,9 @@ fn tool_call(
                 extra.push((
                     "edge".to_string(),
                     vec![
-                        s, p, o,
+                        s,
+                        p,
+                        o,
                         Value::Int(now),
                         Value::Int(i64::MAX),
                         Value::Int(now),
@@ -529,9 +521,7 @@ fn tool_call(
                         ))
                     }
                 }
-                Err(er) => Err(format!(
-                    "canonicalization rejected: {er}"
-                )),
+                Err(er) => Err(format!("canonicalization rejected: {er}")),
             }
         }
         "lemmalog_context" => {
@@ -579,11 +569,21 @@ fn tool_call(
             // models invent tool names; teach instead of rejecting —
             // suggest the closest real tool so the next call succeeds
             let known: Vec<&str> = [
-                "lemmalog_observe", "lemmalog_retract", "lemmalog_query",
-                "lemmalog_query_deep", "lemmalog_why", "lemmalog_install_rules",
-                "lemmalog_uninstall", "lemmalog_batches", "lemmalog_what_if",
-                "lemmalog_canonicalize", "lemmalog_context", "lemmalog_dump",
-                "lemmalog_changes", "lemmalog_save", "lemmalog_run",
+                "lemmalog_observe",
+                "lemmalog_retract",
+                "lemmalog_query",
+                "lemmalog_query_deep",
+                "lemmalog_why",
+                "lemmalog_install_rules",
+                "lemmalog_uninstall",
+                "lemmalog_batches",
+                "lemmalog_what_if",
+                "lemmalog_canonicalize",
+                "lemmalog_context",
+                "lemmalog_dump",
+                "lemmalog_changes",
+                "lemmalog_save",
+                "lemmalog_run",
             ]
             .to_vec();
             let stripped = other.trim_start_matches("lemmalog_");
@@ -617,7 +617,10 @@ fn tool_call(
     if !is_error
         && matches!(
             name,
-            "lemmalog_observe" | "lemmalog_install_rules" | "lemmalog_uninstall" | "lemmalog_canonicalize"
+            "lemmalog_observe"
+                | "lemmalog_install_rules"
+                | "lemmalog_uninstall"
+                | "lemmalog_canonicalize"
         )
     {
         if let Some(p) = path {

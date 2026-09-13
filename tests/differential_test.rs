@@ -39,12 +39,26 @@ struct GenAtom {
 impl GenAtom {
     fn render(&self, second: &str) -> String {
         let x = if self.x_is_var {
-            if self.x_swap { second.to_string() } else { "X".to_string() }
+            if self.x_swap {
+                second.to_string()
+            } else {
+                "X".to_string()
+            }
         } else {
             CONSTS[0].to_string()
         };
-        let y = if self.y_is_var { second.to_string() } else { CONSTS[1].to_string() };
-        format!("{}{}({}, {})", if self.neg { "!" } else { "" }, self.pred, x, y)
+        let y = if self.y_is_var {
+            second.to_string()
+        } else {
+            CONSTS[1].to_string()
+        };
+        format!(
+            "{}{}({}, {})",
+            if self.neg { "!" } else { "" },
+            self.pred,
+            x,
+            y
+        )
     }
 }
 
@@ -87,26 +101,39 @@ fn gen_program(rng: &mut Rng) -> (String, Vec<(String, String, String)>) {
             }
             // ensure at least one positive atom so heads are range-restricted
             if first_pos.is_none() {
-                let atom = GenAtom {
-                    pred: EDB[rng.below(2)].to_string(),
-                    neg: false,
-                    x_is_var: true,
-                    y_is_var: true,
-                    x_swap: false,
-                };
-                body.insert(0, atom.clone());
-                first_pos = Some(atom);
+                body.insert(
+                    0,
+                    GenAtom {
+                        pred: EDB[rng.below(2)].to_string(),
+                        neg: false,
+                        x_is_var: true,
+                        y_is_var: true,
+                        x_swap: false,
+                    },
+                );
             }
             let rendered: Vec<String> = body.iter().map(|a| a.render("Y")).collect();
             // range-restricted head: a var may appear only if some positive
             // body atom mentions it (unsafe rules are rejected by design)
-            let x_used = rendered.iter().any(|a| !a.starts_with('!') && arg_has(a, "X"));
-            let y_used = rendered.iter().any(|a| !a.starts_with('!') && arg_has(a, "Y"));
+            let x_used = rendered
+                .iter()
+                .any(|a| !a.starts_with('!') && arg_has(a, "X"));
+            let y_used = rendered
+                .iter()
+                .any(|a| !a.starts_with('!') && arg_has(a, "Y"));
             let head = format!(
                 "{}({}, {})",
                 p,
-                if x_used && rng.below(4) > 0 { "X" } else { CONSTS[rng.below(3)] },
-                if y_used && rng.below(4) > 0 { "Y" } else { CONSTS[rng.below(3)] }
+                if x_used && rng.below(4) > 0 {
+                    "X"
+                } else {
+                    CONSTS[rng.below(3)]
+                },
+                if y_used && rng.below(4) > 0 {
+                    "Y"
+                } else {
+                    CONSTS[rng.below(3)]
+                }
             );
             rules.push_str(&format!("{} :- {}.\n", head, rendered.join(", ")));
         }
@@ -130,7 +157,10 @@ fn arg_has(atom: &str, v: &str) -> bool {
 
 /// Naive fixpoint oracle: ground substitutions over {a,b,c}, iterate rules
 /// until no new facts. Dead simple by design.
-fn naive_fixpoint(rules_text: &str, edb: &[(String, String, String)]) -> BTreeSet<(String, String, String)> {
+fn naive_fixpoint(
+    rules_text: &str,
+    edb: &[(String, String, String)],
+) -> BTreeSet<(String, String, String)> {
     // parse rules ourselves (minimal, matching the generator's shapes)
     struct NRule {
         head: (String, String, String), // pred, arg1, arg2 (var names or consts)
@@ -211,11 +241,7 @@ fn naive_fixpoint(rules_text: &str, edb: &[(String, String, String)]) -> BTreeSe
                         }
                     }
                     if ok {
-                        let h = (
-                            r.head.0.clone(),
-                            resolve(&r.head.1),
-                            resolve(&r.head.2),
-                        );
+                        let h = (r.head.0.clone(), resolve(&r.head.1), resolve(&r.head.2));
                         if !all.contains(&h) {
                             all.insert(h);
                             added = true;
@@ -233,7 +259,10 @@ fn naive_fixpoint(rules_text: &str, edb: &[(String, String, String)]) -> BTreeSe
         .collect()
 }
 
-fn engine_fixpoint(rules_text: &str, edb: &[(String, String, String)]) -> BTreeSet<(String, String, String)> {
+fn engine_fixpoint(
+    rules_text: &str,
+    edb: &[(String, String, String)],
+) -> BTreeSet<(String, String, String)> {
     let mut e = Engine::new();
     e.install_program(rules_text).unwrap();
     for (p, s, o) in edb {
@@ -271,7 +300,10 @@ fn engine_agrees_with_naive_oracle_on_random_programs() {
             }
         }
     }
-    assert_eq!(mismatches, 0, "{mismatches}/300 random programs disagree with the oracle");
+    assert_eq!(
+        mismatches, 0,
+        "{mismatches}/300 random programs disagree with the oracle"
+    );
 }
 
 #[test]

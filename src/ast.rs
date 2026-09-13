@@ -117,7 +117,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             }
             let s: String = b[start..i].iter().collect();
             toks.push(Tok::Int(
-                s.parse().map_err(|_| ParseError(format!("bad integer {s}")))?,
+                s.parse()
+                    .map_err(|_| ParseError(format!("bad integer {s}")))?,
             ));
         } else if c.is_alphabetic() || c == '_' {
             let start = i;
@@ -359,4 +360,3 @@ impl Parser {
         }
     }
 }
-

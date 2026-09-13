@@ -419,9 +419,7 @@ impl<A: Annotation> Relation<A> {
         if let Some(&id) = self.by_key.get(args) {
             let existing = &mut self.rows[id].fact;
             existing.ann = existing.ann.plus(ann);
-            if existing.supports.len() < SUPPORT_CAP
-                && !existing.supports.contains(&support)
-            {
+            if existing.supports.len() < SUPPORT_CAP && !existing.supports.contains(&support) {
                 existing.supports.push(support);
             }
             true
@@ -441,8 +439,12 @@ impl<A: Annotation> Relation<A> {
     pub fn len(&self) -> usize {
         self.rows.len()
     }
-}
 
+    /// Whether the relation holds no rows.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
 
 // ------------------------------------------------------------- environment
 
@@ -687,8 +689,10 @@ impl<A: Annotation> Engine<A> {
             let existed = rel.remove(args);
             rel.pending.remove(args);
             if existed {
-                self.feed
-                    .push(Change::Retracted(self.epoch, (pred.to_string(), args.to_vec())));
+                self.feed.push(Change::Retracted(
+                    self.epoch,
+                    (pred.to_string(), args.to_vec()),
+                ));
                 self.retracted.insert(pred.to_string());
             }
             existed
@@ -837,8 +841,7 @@ impl<A: Annotation> Engine<A> {
                     on_stack[v] = true;
                 }
                 let mut recursed = false;
-                for i in ai..adj[v].len() {
-                    let w = adj[v][i];
+                for (i, &w) in adj[v].iter().enumerate().skip(ai) {
                     if disc[w] == 0 {
                         call.push((v, i + 1));
                         call.push((w, 0));
@@ -930,12 +933,8 @@ impl<A: Annotation> Engine<A> {
             }
         }
         // program-embedded facts
-        let fact_clauses: Vec<Clause> = self
-            .clauses
-            .iter()
-            .filter(|c| c.is_fact)
-            .cloned()
-            .collect();
+        let fact_clauses: Vec<Clause> =
+            self.clauses.iter().filter(|c| c.is_fact).cloned().collect();
         for c in &fact_clauses {
             if let Some(args) = self.ground_args(&c.head.args) {
                 self.declare(&c.head.pred, &args, A::one());
@@ -1094,109 +1093,105 @@ impl<A: Annotation> Engine<A> {
                 if to_clear.is_empty() {
                     break;
                 }
-            let mut here: BTreeSet<String> = stratum
-                .iter()
-                .map(|&i| self.clauses[i].head.pred.clone())
-                .filter(|p| to_clear.contains(p))
-                .collect();
-            // aggregation temps attach to their clause's stratum
-            for &i in stratum {
-                if !self.clauses[i].is_fact && Self::is_agg_clause(&self.clauses[i]) {
-                    let t = self.agg_temp_pred(i);
-                    if to_clear.contains(&t) {
-                        here.insert(t);
-                    }
-                }
-            }
-            if here.is_empty() {
-                continue;
-            }
-            to_clear = to_clear.difference(&here).cloned().collect();
-            // snapshots to detect actual change
-            let mut snapshots: std::collections::BTreeMap<String, BTreeSet<Vec<Value>>> =
-                Default::default();
-            for p in &here {
-                if let Some(rel) = self.relations.get(p) {
-                    snapshots.insert(
-                        p.clone(),
-                        rel.rows.iter().map(|r| r.key.clone()).collect(),
-                    );
-                }
-            }
-            for p in &here {
-                if let Some(rel) = self.relations.get_mut(p) {
-                    preexisting
-                        .entry(p.clone())
-                        .or_insert_with(|| rel.rows.iter().map(|r| r.key.clone()).collect());
-                    if rel.len() > 0 {
-                        self.feed.push(Change::Cleared(self.epoch, p.clone()));
-                    }
-                    rel.clear();
-                }
-            }
-            // seed: full contents of the body predicates of these rules
-            // that were not just cleared
-            let mut seeds: BTreeSet<String> = BTreeSet::new();
-            for (ci, c) in self.clauses.iter().enumerate() {
-                if c.is_fact {
-                    continue;
-                }
-                let owner = if Self::is_agg_clause(c) {
-                    self.agg_temp_pred(ci)
-                } else {
-                    c.head.pred.clone()
-                };
-                if !here.contains(&owner) {
-                    continue;
-                }
-                for lit in &c.body {
-                    if let Lit::Pos(a) | Lit::Neg(a) = lit {
-                        if !here.contains(&a.pred) {
-                            seeds.insert(a.pred.clone());
+                let mut here: BTreeSet<String> = stratum
+                    .iter()
+                    .map(|&i| self.clauses[i].head.pred.clone())
+                    .filter(|p| to_clear.contains(p))
+                    .collect();
+                // aggregation temps attach to their clause's stratum
+                for &i in stratum {
+                    if !self.clauses[i].is_fact && Self::is_agg_clause(&self.clauses[i]) {
+                        let t = self.agg_temp_pred(i);
+                        if to_clear.contains(&t) {
+                            here.insert(t);
                         }
                     }
                 }
-            }
-            for p in seeds {
-                if let Some(rel) = self.relations.get_mut(&p) {
-                    let keys: Vec<Vec<Value>> = rel.rows.iter().map(|r| r.key.clone()).collect();
-                    rel.pending.extend(keys);
+                if here.is_empty() {
+                    continue;
                 }
-            }
-            derived += self.eval_stratum(stratum);
-            evaluated.insert(si);
-            // changed predicates propagate clearing to their readers
-            for p in &here {
-                let now_keys: BTreeSet<Vec<Value>> = self
-                    .relations
-                    .get(p)
-                    .map(|r| r.rows.iter().map(|x| x.key.clone()).collect())
-                    .unwrap_or_default();
-                let changed = now_keys != snapshots.get(p).cloned().unwrap_or_default();
-                if changed {
-                    if let Some(readers) = direct_readers.get(p) {
-                        for r in readers {
-                            // eval_stratum already fixpoints within a
-                            // stratum (self-recursion and same-SCC readers
-                            // see the final state); requeueing them only
-                            // buys a redundant full-rebuild round
-                            if r != p && !here.contains(r) && idb.contains(r) {
-                                to_clear.insert(r.clone());
+                to_clear = to_clear.difference(&here).cloned().collect();
+                // snapshots to detect actual change
+                let mut snapshots: std::collections::BTreeMap<String, BTreeSet<Vec<Value>>> =
+                    Default::default();
+                for p in &here {
+                    if let Some(rel) = self.relations.get(p) {
+                        snapshots
+                            .insert(p.clone(), rel.rows.iter().map(|r| r.key.clone()).collect());
+                    }
+                }
+                for p in &here {
+                    if let Some(rel) = self.relations.get_mut(p) {
+                        preexisting
+                            .entry(p.clone())
+                            .or_insert_with(|| rel.rows.iter().map(|r| r.key.clone()).collect());
+                        if !rel.is_empty() {
+                            self.feed.push(Change::Cleared(self.epoch, p.clone()));
+                        }
+                        rel.clear();
+                    }
+                }
+                // seed: full contents of the body predicates of these rules
+                // that were not just cleared
+                let mut seeds: BTreeSet<String> = BTreeSet::new();
+                for (ci, c) in self.clauses.iter().enumerate() {
+                    if c.is_fact {
+                        continue;
+                    }
+                    let owner = if Self::is_agg_clause(c) {
+                        self.agg_temp_pred(ci)
+                    } else {
+                        c.head.pred.clone()
+                    };
+                    if !here.contains(&owner) {
+                        continue;
+                    }
+                    for lit in &c.body {
+                        if let Lit::Pos(a) | Lit::Neg(a) = lit {
+                            if !here.contains(&a.pred) {
+                                seeds.insert(a.pred.clone());
                             }
                         }
                     }
                 }
-            }
+                for p in seeds {
+                    if let Some(rel) = self.relations.get_mut(&p) {
+                        let keys: Vec<Vec<Value>> =
+                            rel.rows.iter().map(|r| r.key.clone()).collect();
+                        rel.pending.extend(keys);
+                    }
+                }
+                derived += self.eval_stratum(stratum);
+                evaluated.insert(si);
+                // changed predicates propagate clearing to their readers
+                for p in &here {
+                    let now_keys: BTreeSet<Vec<Value>> = self
+                        .relations
+                        .get(p)
+                        .map(|r| r.rows.iter().map(|x| x.key.clone()).collect())
+                        .unwrap_or_default();
+                    let changed = now_keys != snapshots.get(p).cloned().unwrap_or_default();
+                    if changed {
+                        if let Some(readers) = direct_readers.get(p) {
+                            for r in readers {
+                                // eval_stratum already fixpoints within a
+                                // stratum (self-recursion and same-SCC readers
+                                // see the final state); requeueing them only
+                                // buys a redundant full-rebuild round
+                                if r != p && !here.contains(r) && idb.contains(r) {
+                                    to_clear.insert(r.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         // multi-round re-derivations of facts that existed before the
         // recompute are not new facts
         for (p, keys) in &preexisting {
             if let Some(rel) = self.relations.get(p) {
-                let still: usize = keys
-                    .iter()
-                    .filter(|k| rel.contains(k))
-                    .count();
+                let still: usize = keys.iter().filter(|k| rel.contains(k)).count();
                 derived = derived.saturating_sub(still);
             }
         }
@@ -1347,8 +1342,12 @@ impl<A: Annotation> Engine<A> {
                         },
                     );
                 if is_new {
-                    self.feed.push(Change::Added(self.epoch, (c.head.pred.clone(), out.clone())));
-                    self.change_log.push((self.epoch, (c.head.pred.clone(), out)));
+                    self.feed.push(Change::Added(
+                        self.epoch,
+                        (c.head.pred.clone(), out.clone()),
+                    ));
+                    self.change_log
+                        .push((self.epoch, (c.head.pred.clone(), out)));
                     changed += 1;
                 }
             }
@@ -1432,7 +1431,7 @@ impl<A: Annotation> Engine<A> {
         }
         for p in &to_clear {
             if let Some(rel) = self.relations.get_mut(p) {
-                if rel.len() > 0 {
+                if !rel.is_empty() {
                     self.feed.push(Change::Cleared(self.epoch, p.clone()));
                 }
                 rel.clear();
@@ -1719,10 +1718,9 @@ impl<A: Annotation> Engine<A> {
                         }
                         (Some(av), 1) => {
                             // RHS is X + c; solvable for equality: av = X + c
-                            if *op == CmpOp::Eq && var.is_some() {
-                                if let Some(ai) = av.as_int() {
-                                    let v = var.unwrap();
-                                    env.bind(&v, Value::Int(ai - c));
+                            if *op == CmpOp::Eq {
+                                if let (Some(v), Some(ai)) = (var.as_ref(), av.as_int()) {
+                                    env.bind(v, Value::Int(ai - c));
                                     return self.solve_all(clause, i + 1, skip, env, out);
                                 }
                             }
@@ -1932,7 +1930,7 @@ impl<A: Annotation> Engine<A> {
         if self
             .relations
             .get(&head.pred)
-            .map(|r| r.len() > 0)
+            .map(|r| !r.is_empty())
             .unwrap_or(false)
         {
             return Ok(self.ask(goal)?);
@@ -1940,7 +1938,7 @@ impl<A: Annotation> Engine<A> {
         let materialized: std::collections::BTreeSet<String> = self
             .relations
             .iter()
-            .filter(|(_, rel)| rel.len() > 0)
+            .filter(|(_, rel)| !rel.is_empty())
             .map(|(p, _)| p.clone())
             .collect();
         let demand = crate::magic::build(&self.clauses, head, &materialized)?;
@@ -2181,7 +2179,8 @@ fn reaches(deps: &HashMap<&str, Vec<(&str, bool)>>, from: &str, to: &str) -> boo
     false
 }
 
-fn cmp_holds(op: CmpOp, a: Value, b: Value) -> bool {    match op {
+fn cmp_holds(op: CmpOp, a: Value, b: Value) -> bool {
+    match op {
         CmpOp::Lt => a < b,
         CmpOp::Le => a <= b,
         CmpOp::Gt => a > b,

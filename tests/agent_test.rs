@@ -26,7 +26,10 @@ fn reobservation_is_noop() {
     assert_eq!(r.noop, 1);
     assert_eq!(r.added, 0);
     m.maintain(100);
-    assert_eq!(m.ask("current(\"alice\", \"works_at\", O)").unwrap().len(), 1);
+    assert_eq!(
+        m.ask("current(\"alice\", \"works_at\", O)").unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -48,9 +51,17 @@ fn exclusive_pred_supersedes_deterministically() {
         "knowledge update applied"
     );
     // the old edge is closed, not deleted: history preserved
-    let closed = m
-        .engine
-        .query("edge", &[None, None, None, None, Some(lemmalog::Value::Int(200)), None]);
+    let closed = m.engine.query(
+        "edge",
+        &[
+            None,
+            None,
+            None,
+            None,
+            Some(lemmalog::Value::Int(200)),
+            None,
+        ],
+    );
     assert_eq!(closed.len(), 1, "exactly one edge closed at t=200");
 }
 
@@ -90,10 +101,8 @@ fn context_assembly_is_positional_and_budgeted() {
 
 #[test]
 fn derivation_rules_compose_with_ingestion() {
-    let mut m = mem(
-        "reports_to(X,Y) :- current(X,\"manager\",Y).\n\
-         trans: reports_to(X,Z) :- reports_to(X,Y), reports_to(Y,Z).",
-    );
+    let mut m = mem("reports_to(X,Y) :- current(X,\"manager\",Y).\n\
+         trans: reports_to(X,Z) :- reports_to(X,Y), reports_to(Y,Z).");
     m.observe("alice --manager--> bob\nbob --manager--> carol");
     let derived = m.maintain(100);
     assert_eq!(derived, 5, "2 current + 2 direct + 1 transitive");
@@ -144,16 +153,30 @@ fn llm_extractor_pluggable_and_memoized() {
     // per-fact confidence honored by the protocol
     let emp = m.ask("current(\"alice\", \"works_at\", O)").unwrap();
     assert_eq!(emp, vec!["O=acme".to_string()]);
-    let (a, wa, ac) = (m.engine.sym("alice"), m.engine.sym("works_at"), m.engine.sym("acme"));
-    let f = m.engine.fact("edge", &[a, wa, ac, Value::Int(100), Value::Int(i64::MAX), Value::Int(100)]).unwrap();
+    let (a, wa, ac) = (
+        m.engine.sym("alice"),
+        m.engine.sym("works_at"),
+        m.engine.sym("acme"),
+    );
+    let f = m
+        .engine
+        .fact(
+            "edge",
+            &[
+                a,
+                wa,
+                ac,
+                Value::Int(100),
+                Value::Int(i64::MAX),
+                Value::Int(100),
+            ],
+        )
+        .unwrap();
     assert!((f.ann.conf - 0.7).abs() < 1e-9, "conf = {}", f.ann.conf);
     // extraction errors degrade to zero facts, not poison
     // (checked via a second memory below)
-    let mut m2 = AgentMemory::new(
-        LlmExtractor::new(|_| Err("provider down".to_string())),
-        "",
-    )
-    .unwrap();
+    let mut m2 =
+        AgentMemory::new(LlmExtractor::new(|_| Err("provider down".to_string())), "").unwrap();
     let r2 = m2.observe("whatever");
     assert_eq!(r2.added, 0);
 }
@@ -199,7 +222,10 @@ fn snapshot_roundtrip_rebuilds_derived_relations() {
             None => s.to_string(),
         }
     };
-    assert_eq!(strip_news(&m2.context(&["alice"], 300)), strip_news(&before_ctx));
+    assert_eq!(
+        strip_news(&m2.context(&["alice"], 300)),
+        strip_news(&before_ctx)
+    );
     // why() still walks to the re-asserted base facts
     let w = m2.why("current(alice, works_at, gigant)");
     assert!(w.contains("asserted (base fact)"), "{w}");
@@ -268,7 +294,9 @@ fn parse_protocol_reported_gives_drop_reasons() {
         "{reasons:?}"
     );
     assert!(
-        reasons.iter().any(|r| r.contains("prose") || r.contains("punctuation")),
+        reasons
+            .iter()
+            .any(|r| r.contains("prose") || r.contains("punctuation")),
         "{reasons:?}"
     );
     assert!(
@@ -280,10 +308,8 @@ fn parse_protocol_reported_gives_drop_reasons() {
 #[test]
 fn observe_extracted_applies_policy_and_reports_drops() {
     let mut m = mem("");
-    let (report, dropped) = m.observe_extracted(
-        "alice --works_at--> acme\nspeaker --works_at--> acme",
-        100,
-    );
+    let (report, dropped) =
+        m.observe_extracted("alice --works_at--> acme\nspeaker --works_at--> acme", 100);
     assert_eq!(report.added, 1, "only the clean fact asserted");
     assert_eq!(dropped.len(), 1);
     assert!(dropped[0].1.contains("role word"));
@@ -367,10 +393,16 @@ fn batch_ids_never_collide_across_uninstall() {
     // with ids derived from rule_batches.len() the new batch would reuse
     // b2 while the original b2 is still live, and uninstall("b2") would
     // then target whichever batch position() finds first
-    let b1 = m.install_rules("r1(X, Y) :- current(X, \"knows\", Y).").unwrap();
-    let b2 = m.install_rules("r2(X, Y) :- current(X, \"likes\", Y).").unwrap();
+    let b1 = m
+        .install_rules("r1(X, Y) :- current(X, \"knows\", Y).")
+        .unwrap();
+    let b2 = m
+        .install_rules("r2(X, Y) :- current(X, \"likes\", Y).")
+        .unwrap();
     assert!(m.uninstall_rules(&b1));
-    let b3 = m.install_rules("r3(X, Y) :- current(X, \"owns\", Y).").unwrap();
+    let b3 = m
+        .install_rules("r3(X, Y) :- current(X, \"owns\", Y).")
+        .unwrap();
     assert_ne!(b2, b3, "new batch id must not collide with a live batch");
     // uninstall by id after the churn removes exactly the batch asked for
     assert!(m.uninstall_rules(&b2));
@@ -440,7 +472,10 @@ fn rich_context_carries_attribution_and_latest_values() {
     m.maintain(200);
     let ctx = m.context_for_query_rich("What was grandma's gift to Melanie?", 400);
     assert!(ctx.contains("ATTRIBUTION"), "{ctx}");
-    assert!(ctx.to_lowercase().contains("no topic facts for: melanie"), "{ctx}");
+    assert!(
+        ctx.to_lowercase().contains("no topic facts for: melanie"),
+        "{ctx}"
+    );
     let ctx2 = m.context_for_query_rich("What is the latest amount Melanie charges?", 400);
     assert!(ctx2.contains("CURRENT STATE"), "{ctx2}");
     assert!(
@@ -459,7 +494,7 @@ fn kernel_code_facts_surive_strict_validation() {
                  entry --links--> entry->links\n\
                  vm_map --lookup--> vm_map_lookup_entry()\n\
                  page --addr_flags--> &vm_page[0]";
-    let m = AgentMemory::<MockExtractor>::new(MockExtractor::new(0.9), "").unwrap();
+    let _m = AgentMemory::<MockExtractor>::new(MockExtractor::new(0.9), "").unwrap();
     let parsed = lemmalog::agent::parse_protocol_strict(facts, 0.9);
     assert_eq!(parsed.len(), 6, "all C-syntax facts parse: {parsed:?}");
     // leaked deliberation still dies: spaces + punctuation
@@ -497,7 +532,10 @@ fn functional_relations_supersede_and_multi_accumulate_silently() {
     );
     assert_eq!(r2.escalations.len(), 0, "evidence adds silently");
     m.maintain(300);
-    assert_eq!(m.ask("current(\"hyp_1\", \"evidence\", E)").unwrap().len(), 2);
+    assert_eq!(
+        m.ask("current(\"hyp_1\", \"evidence\", E)").unwrap().len(),
+        2
+    );
 }
 
 #[test]

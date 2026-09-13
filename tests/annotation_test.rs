@@ -51,20 +51,29 @@ impl Annotation for Tally {
 
         Tally {
             atoms: self.atoms + other.atoms,
-            derivations: self.derivations.union(&other.derivations).cloned().collect(),
+            derivations: self
+                .derivations
+                .union(&other.derivations)
+                .cloned()
+                .collect(),
         }
     }
 
     fn plus(&self, other: &Self) -> Self {
         Tally {
             atoms: self.atoms.max(other.atoms),
-            derivations: self.derivations.union(&other.derivations).cloned().collect(),
+            derivations: self
+                .derivations
+                .union(&other.derivations)
+                .cloned()
+                .collect(),
         }
     }
 
     fn derive(mut self, rule: &str, body: &[Key]) -> Self {
         let preds: Vec<&str> = body.iter().map(|(pred, _)| pred.as_str()).collect();
-        self.derivations.insert(format!("{rule}[{}]", preds.join(",")));
+        self.derivations
+            .insert(format!("{rule}[{}]", preds.join(",")));
 
         self
     }

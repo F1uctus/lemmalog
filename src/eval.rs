@@ -47,10 +47,9 @@ impl Ann {
 
 // ------------------------------------------------- annotation polymorphism
 
-/// The structure a fact's annotation lives in (design doc Phase 3:
-/// "annotation polymorphism (boolean -> confidence t-norm -> provenance
-/// set)"). `Ann` -- confidence t-norm x provenance set -- is the default
-/// instantiation and the semantics this engine ships with; the parameter is
+/// The structure a fact's annotation lives in. `Ann` -- confidence t-norm x
+/// provenance set -- is the default instantiation and the semantics this
+/// engine ships with; the parameter is
 /// what lets a caller substitute the boolean semiring, a bare provenance set,
 /// a salience interval lattice, or a provenance polynomial (Green et al.,
 /// PODS 2007) without forking the evaluator.
@@ -157,10 +156,9 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
         Self::one()
     }
 
-    /// How this annotation prints inside a `why()` proof tree. The design
-    /// doc puts "why/1, proof-tree rendering into model-consumable text" in
-    /// the same phase as annotation polymorphism, so the renderer is part of
-    /// the annotation's contract rather than hard-coded in the evaluator.
+    /// How this annotation prints inside a `why()` proof tree. Rendering is
+    /// part of the annotation's contract rather than hard-coded in the
+    /// evaluator: only the carrier knows what its own payload means.
     fn render(&self) -> String {
         format!("{self:?}")
     }

@@ -4,7 +4,7 @@
 //! the classic validation technique for Datalog engines: any disagreement
 //! between the optimized evaluator and the dead-simple oracle is a bug.
 
-use lemmalog::{Ann, Engine, Value};
+use lemmalog::{Ann, Annotation, Engine, Value};
 use std::collections::BTreeSet;
 
 struct Rng(u64);
@@ -259,15 +259,55 @@ fn naive_fixpoint(
         .collect()
 }
 
-fn engine_fixpoint(
+/// A second carrier for the oracle to run at, so that the fixpoint is driven
+/// through the annotation parameter and not only at its default.
+///
+/// Deliberately NOT a clone of `Ann`. It reads a negated literal as
+/// suppression in proportion to the blocker's own weight -- the complement --
+/// where `Ann` takes the trait's default of negation-as-absence. That is the
+/// one hook that can change which facts exist, so pointing the oracle at a
+/// carrier which overrides it is the whole reason the parameter is here.
+///
+/// Everything else is the trait's default, `is_zero` included: a blocked body
+/// prunes because `1.0 - 1.0 == 0.0` compares equal to `zero()`, not because
+/// this carrier says so. The oracle mints every fact at `one()`, so the two
+/// instantiations must agree on every generated program; they disagree the
+/// moment the complement is misread, which is what makes the assertion below
+/// evidence rather than decoration.
+#[derive(Debug, Clone, PartialEq)]
+struct Weight(f64);
+
+impl Annotation for Weight {
+    fn one() -> Self {
+        Weight(1.0)
+    }
+
+    fn zero() -> Self {
+        Weight(0.0)
+    }
+
+    fn times(&self, other: &Self) -> Self {
+        Weight(self.0 * other.0)
+    }
+
+    fn plus(&self, other: &Self) -> Self {
+        Weight(self.0.max(other.0))
+    }
+
+    fn negate(found: Option<&Self>) -> Self {
+        Weight(1.0 - found.map_or(0.0, |w| w.0))
+    }
+}
+
+fn engine_fixpoint<A: Annotation>(
     rules_text: &str,
     edb: &[(String, String, String)],
 ) -> BTreeSet<(String, String, String)> {
-    let mut e = Engine::new();
+    let mut e: Engine<A> = Engine::default();
     e.install_program(rules_text).unwrap();
     for (p, s, o) in edb {
         let (sv, ov) = (e.sym(s), e.sym(o));
-        e.declare(p, &[sv, ov], Ann::unit());
+        e.declare(p, &[sv, ov], A::one());
     }
     e.run();
     let mut out = BTreeSet::new();
@@ -290,7 +330,7 @@ fn engine_agrees_with_naive_oracle_on_random_programs() {
         let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
         let (rules, facts) = gen_program(&mut rng);
         let want = naive_fixpoint(&rules, &facts);
-        let got = engine_fixpoint(&rules, &facts);
+        let got = engine_fixpoint::<Ann>(&rules, &facts);
         if want != got {
             mismatches += 1;
             if mismatches <= 3 {
@@ -299,6 +339,16 @@ fn engine_agrees_with_naive_oracle_on_random_programs() {
                     got.difference(&want).collect::<Vec<_>>());
             }
         }
+        // The same programs, at a carrier that is not the default. Upstream's
+        // oracle compares WHICH facts derive, and the annotation is the only
+        // thing that can change that set without changing the program, so a
+        // second instantiation is what puts the parameter itself under the
+        // oracle.
+        assert_eq!(
+            got,
+            engine_fixpoint::<Weight>(&rules, &facts),
+            "seed {seed}: Engine<Weight> derives a different fact set than Engine<Ann>"
+        );
     }
     assert_eq!(
         mismatches, 0,
@@ -313,7 +363,7 @@ fn incremental_agrees_with_from_scratch() {
     for seed in 1..=150u64 {
         let mut rng = Rng(seed.wrapping_mul(0xD1B54A32D192ED03) | 1);
         let (rules, facts) = gen_program(&mut rng);
-        let from_scratch = engine_fixpoint(&rules, &facts);
+        let from_scratch = engine_fixpoint::<Ann>(&rules, &facts);
 
         let mut e = Engine::new();
         e.install_program(&rules).unwrap();

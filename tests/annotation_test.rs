@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use lemmalog::{eval::Key, Annotation, Engine};
+use lemmalog::{eval::Key, AggFn, Annotation, Engine, Value};
 
 /// A carrier that counts the body atoms multiplied into an annotation and
 /// records every derivation stamped onto it, and that **deliberately
@@ -103,6 +103,56 @@ impl Annotation for Minimal {
     }
 }
 
+/// A carrier that records what the evaluator handed to `aggregate`: the head's
+/// aggregate functions, and how many row annotations came with them.
+///
+/// The kinds are the point. `count` and `sum` fold the same group of rows, so
+/// a carrier that wants to treat them differently - a count is right or wrong
+/// as a whole, where a sum is only as wrong as the rows it adds up - cannot
+/// get there from the rows alone.
+#[derive(Debug, Clone, PartialEq)]
+enum Seen {
+    Zero,
+    Fact,
+    Aggregated { kinds: Vec<AggFn>, rows: usize },
+}
+
+impl Annotation for Seen {
+    fn one() -> Self {
+        Seen::Fact
+    }
+
+    fn zero() -> Self {
+        Seen::Zero
+    }
+
+    fn times(&self, other: &Self) -> Self {
+        if self.is_zero() || other.is_zero() {
+            return Seen::Zero;
+        }
+
+        self.clone()
+    }
+
+    fn plus(&self, other: &Self) -> Self {
+        if self.is_zero() {
+            return other.clone();
+        }
+
+        self.clone()
+    }
+
+    fn aggregate<'a>(fns: &[AggFn], rows: impl Iterator<Item = &'a Self>) -> Self
+    where
+        Self: 'a,
+    {
+        Seen::Aggregated {
+            kinds: fns.to_vec(),
+            rows: rows.count(),
+        }
+    }
+}
+
 #[test]
 fn a_carrier_the_evaluator_cannot_interpret_still_drives_the_whole_fixpoint() {
     let mut engine: Engine<Tally> = Engine::default();
@@ -177,6 +227,52 @@ fn the_trait_defaults_alone_reproduce_negation_as_absence() {
             .ann,
         Minimal(1),
         "the rule fires at all, so the absence above is pruning and not a dead program"
+    );
+}
+
+#[test]
+fn an_aggregate_head_tells_the_annotation_which_aggregate_it_is_folding() {
+    let mut engine: Engine<Seen> = Engine::default();
+    engine
+        .install_program(
+            "tool_count(P, count(T)) :- has_tool(P, T).\n\
+             tool_total(P, sum(N)) :- tool_size(P, N).",
+        )
+        .expect("the program parses");
+
+    let scribe = engine.sym("scribe");
+    for tool in ["socat", "rg"] {
+        let tool = engine.sym(tool);
+        engine.declare("has_tool", &[scribe, tool], Seen::one());
+    }
+    for size in [3, 4] {
+        engine.declare("tool_size", &[scribe, Value::Int(size)], Seen::one());
+    }
+    engine.run();
+
+    // Two heads, one group of two rows each, and the same evaluator call site.
+    // The only thing that separates them is the head's own aggregate kind, so
+    // a call site that passed a constant - or nothing - reads as a different
+    // value here rather than as silence.
+    assert_eq!(
+        engine
+            .fact("tool_count", &[scribe, Value::Int(2)])
+            .expect("the count head derives")
+            .ann,
+        Seen::Aggregated {
+            kinds: vec![AggFn::Count],
+            rows: 2,
+        }
+    );
+    assert_eq!(
+        engine
+            .fact("tool_total", &[scribe, Value::Int(7)])
+            .expect("the sum head derives")
+            .ann,
+        Seen::Aggregated {
+            kinds: vec![AggFn::Sum],
+            rows: 2,
+        }
     );
 }
 

@@ -46,7 +46,7 @@ pub use agent::{
 };
 pub use ast::{parse_program, ParseError};
 pub use eval::{Ann, Annotation, Change, Engine, Interpret, StoredFact, StratError};
-pub use intern::{Interner, Term, Value};
+pub use intern::{AggFn, Interner, Term, Value};
 pub use retrieval::{Bm25, Retrieval, Selection};
 pub use scenario::{run_eval, EvalReport, Scenario};
 pub use semantics::{Embedder, HashEmbedder, SemanticIndex, RELEVANCE_RULES};

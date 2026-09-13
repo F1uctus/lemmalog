@@ -2,7 +2,7 @@
 //! seminaive fixpoint evaluation, and provenance tracking.
 
 use crate::ast::{Clause, CmpOp, Lit};
-use crate::intern::{Interner, Term, Value};
+use crate::intern::{AggFn, Interner, Term, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
@@ -146,10 +146,15 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
     }
 
     /// The annotation of an aggregate head, folded over the annotations of
-    /// the rows in its group. The default mints at `one()` -- today's
-    /// behaviour, and the reason an aggregate head currently launders every
-    /// input confidence to 1.0.
-    fn aggregate<'a>(_rows: impl Iterator<Item = &'a Self>) -> Self
+    /// the rows in its group. `fns` is the head's aggregate positions in the
+    /// order they appear in the head, so a carrier can fold `count`
+    /// differently from `sum`: a count is right or wrong as a whole, where a
+    /// sum is only as wrong as the rows it adds up. Without them a carrier
+    /// sees one undifferentiated group of rows and has to guess.
+    ///
+    /// The default mints at `one()` -- today's behaviour, and the reason an
+    /// aggregate head currently launders every input confidence to 1.0.
+    fn aggregate<'a>(_fns: &[AggFn], _rows: impl Iterator<Item = &'a Self>) -> Self
     where
         Self: 'a,
     {
@@ -1260,7 +1265,7 @@ impl<A: Annotation> Engine<A> {
             }
             g
         };
-        let fns: Vec<crate::intern::AggFn> = c
+        let fns: Vec<AggFn> = c
             .head
             .args
             .iter()
@@ -1278,10 +1283,10 @@ impl<A: Annotation> Engine<A> {
                     .filter_map(|r| r.get(ai).and_then(|v| v.as_int()))
                     .collect();
                 let folded = match f {
-                    crate::intern::AggFn::Count => rows.len() as i64,
-                    crate::intern::AggFn::Min => vals.iter().min().copied().unwrap_or(0),
-                    crate::intern::AggFn::Max => vals.iter().max().copied().unwrap_or(0),
-                    crate::intern::AggFn::Sum => vals.iter().sum(),
+                    AggFn::Count => rows.len() as i64,
+                    AggFn::Min => vals.iter().min().copied().unwrap_or(0),
+                    AggFn::Max => vals.iter().max().copied().unwrap_or(0),
+                    AggFn::Sum => vals.iter().sum(),
                 };
                 out.push(Value::Int(folded));
             }
@@ -1335,7 +1340,7 @@ impl<A: Annotation> Engine<A> {
                     .insert(
                         out.clone(),
                         StoredFact {
-                            ann: A::aggregate(row_anns.iter()),
+                            ann: A::aggregate(&fns, row_anns.iter()),
                             supports: vec![support],
                         },
                     );

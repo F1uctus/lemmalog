@@ -98,8 +98,15 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
 
     /// Whether this annotation is the semiring zero. Checked at exactly one
     /// site, the negated literal, to decide whether the body prunes.
+    ///
+    /// The default compares against `zero()`, which is what makes `negate`'s
+    /// default reproduce negation-as-absence: pruning is decided here, not by
+    /// what `negate` returns, so a carrier that overrides neither still drops a
+    /// blocked body exactly as the concrete evaluator did. `PartialEq` is a
+    /// supertrait, so this costs nothing. Override it for a carrier whose zero
+    /// is a class of values rather than one value.
     fn is_zero(&self) -> bool {
-        false
+        *self == Self::zero()
     }
 
     /// Stamp a completed body product with the identity of the derivation
@@ -109,9 +116,18 @@ pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
     /// It exists because `plus` alone cannot tell "the same derivation found
     /// twice" from "two different derivations": the evaluator fires a rule
     /// once per positive body atom position, so one logical derivation
-    /// arrives once per permutation of its body. A carrier whose reading
-    /// depends on counting DISTINCT derivations keys them here, on the rule
-    /// name and the SORTED body keys.
+    /// arrives once per permutation of its body.
+    ///
+    /// **`body` arrives in FIRING ORDER, and the evaluator will not sort it.**
+    /// The delta atom comes first and the remaining body atoms follow in body
+    /// order, so the same logical derivation is delivered once per permutation,
+    /// each time with a different `body` sequence. A carrier whose reading
+    /// counts DISTINCT derivations must therefore **sort `body` itself** before
+    /// fingerprinting it, together with `rule`. Keying on the slice as received
+    /// counts one derivation once per permutation, which silently turns any
+    /// average over derivations into a permutation-weighted one. Sorting is the
+    /// carrier's obligation because it is the carrier that knows whether it
+    /// needs the identity at all, and the default does not.
     fn derive(self, _rule: &str, _body: &[Key]) -> Self {
         self
     }
@@ -540,6 +556,10 @@ impl std::fmt::Display for StratError {
     }
 }
 impl std::error::Error for StratError {}
+
+/// One aggregate fold's groups: group key -> (the rows' aggregated columns,
+/// those same rows' annotations, in the same order).
+type AggGroups<A> = BTreeMap<Vec<Value>, (Vec<Vec<Value>>, Vec<A>)>;
 
 impl Engine<Ann> {
     /// The default engine: confidence t-norm x provenance set.
@@ -1238,8 +1258,7 @@ impl<A: Annotation> Engine<A> {
                 .iter()
                 .filter(|t| !matches!(t, Term::Agg(..)))
                 .count();
-            let mut g: std::collections::BTreeMap<Vec<Value>, (Vec<Vec<Value>>, Vec<A>)> =
-                Default::default();
+            let mut g: AggGroups<A> = AggGroups::default();
             for row in &rel.rows {
                 let key = row.key[..group_len].to_vec();
                 let e = g.entry(key).or_insert_with(|| (Vec::new(), Vec::new()));

@@ -45,6 +45,166 @@ impl Ann {
     }
 }
 
+// ------------------------------------------------- annotation polymorphism
+
+/// The structure a fact's annotation lives in (design doc Phase 3:
+/// "annotation polymorphism (boolean -> confidence t-norm -> provenance
+/// set)"). `Ann` -- confidence t-norm x provenance set -- is the default
+/// instantiation and the semantics this engine ships with; the parameter is
+/// what lets a caller substitute the boolean semiring, a bare provenance set,
+/// a salience interval lattice, or a provenance polynomial (Green et al.,
+/// PODS 2007) without forking the evaluator.
+///
+/// ## Laws an implementor must satisfy
+///
+/// A commutative semiring under `plus`/`times` with identities `zero`/`one`:
+///
+/// 1. `plus` is associative and commutative, with `zero` as its identity.
+/// 2. `times` is associative and commutative, with `one` as its identity.
+/// 3. `times` distributes over `plus`.
+/// 4. `zero` annihilates `times`.
+///
+/// and, because this is an incremental fixpoint rather than a one-shot
+/// evaluation, two more that a plain semiring does not give you:
+///
+/// 5. **Monotonicity**: `a <= a.plus(b)` in the semiring's natural order --
+///    an annotation may only ever grow as more derivations are found. Free
+///    when `plus` is idempotent (i.e. the carrier is a join-semilattice).
+/// 6. **Ascending chain condition**: no infinite strictly ascending chain,
+///    or the fixpoint has no termination argument.
+///
+/// The default `Ann` satisfies 1-3, 5 and *not* 4 or 6: `zero` does not
+/// annihilate the provenance component (`{} union p == p`), and `max` over
+/// `f64` admits the infinite chain 0.9, 0.99, 0.999, ... Neither bites today
+/// only because the evaluator never materialises a zero and re-seeds the
+/// delta on *fact* novelty rather than on annotation change -- see
+/// `emit_head`. A carrier that wants annotation changes to propagate needs
+/// law 6 for real.
+pub trait Annotation: Clone + std::fmt::Debug + PartialEq {
+    /// Semiring one: the empty body product. Also the annotation at which
+    /// program-embedded ground facts are minted.
+    fn one() -> Self;
+
+    /// Semiring zero: "no derivation". A literal whose factor is zero prunes.
+    fn zero() -> Self;
+
+    /// Semiring product: how annotations combine ACROSS a rule body.
+    /// (`Ann::join` today: confidence product t-norm, provenance union.)
+    fn times(&self, other: &Self) -> Self;
+
+    /// Semiring sum: how annotations combine when the SAME fact is reached
+    /// again by another derivation. (`max` on confidence today.)
+    fn plus(&self, other: &Self) -> Self;
+
+    /// Whether this annotation is the semiring zero. Checked at exactly one
+    /// site, the negated literal, to decide whether the body prunes.
+    fn is_zero(&self) -> bool {
+        false
+    }
+
+    /// Stamp a completed body product with the identity of the derivation
+    /// that produced it, immediately before `plus` folds it into the head.
+    ///
+    /// The default discards the identity, which is today's behaviour exactly.
+    /// It exists because `plus` alone cannot tell "the same derivation found
+    /// twice" from "two different derivations": the evaluator fires a rule
+    /// once per positive body atom position, so one logical derivation
+    /// arrives once per permutation of its body. A carrier whose reading
+    /// depends on counting DISTINCT derivations keys them here, on the rule
+    /// name and the SORTED body keys.
+    fn derive(self, _rule: &str, _body: &[Key]) -> Self {
+        self
+    }
+
+    /// The factor a negated literal contributes. `found` is the annotation of
+    /// the matching fact, or `None` when the relation has no match.
+    ///
+    /// The default is negation-as-absence, today's semantics exactly: a match
+    /// yields `zero()` and prunes the body, an absence yields `one()` and
+    /// multiplies away. This is the only hook that can change which facts
+    /// exist, which is why it is a trait method and not a post-pass.
+    fn negate(found: Option<&Self>) -> Self {
+        match found {
+            Some(_) => Self::zero(),
+            None => Self::one(),
+        }
+    }
+
+    /// The annotation of an aggregate head, folded over the annotations of
+    /// the rows in its group. The default mints at `one()` -- today's
+    /// behaviour, and the reason an aggregate head currently launders every
+    /// input confidence to 1.0.
+    fn aggregate<'a>(_rows: impl Iterator<Item = &'a Self>) -> Self
+    where
+        Self: 'a,
+    {
+        Self::one()
+    }
+
+    /// How this annotation prints inside a `why()` proof tree. The design
+    /// doc puts "why/1, proof-tree rendering into model-consumable text" in
+    /// the same phase as annotation polymorphism, so the renderer is part of
+    /// the annotation's contract rather than hard-coded in the evaluator.
+    fn render(&self) -> String {
+        format!("{self:?}")
+    }
+}
+
+/// A read-time interpretation of an annotation: evaluate the accumulated
+/// annotation in some target structure (Green et al. PODS 2007 §4, where a
+/// provenance polynomial is specialised by a semiring homomorphism).
+///
+/// Deliberately a SEPARATE trait from [`Annotation`]: the evaluator never
+/// calls it. That is the whole point. `Annotation` is what must be lawful
+/// because the fixpoint folds it; `Interpret` is free to be something the
+/// fixpoint could not have folded -- an arithmetic mean, a median, a count,
+/// a rendered proof term -- because it runs once, at read time, over a
+/// finished annotation. A semantics whose final value is not associative
+/// lives here, and the carrier it is read out of stays a lawful semiring.
+pub trait Interpret<V>: Annotation {
+    fn interpret(&self) -> V;
+}
+
+impl Annotation for Ann {
+    fn one() -> Self {
+        Ann::unit()
+    }
+
+    fn zero() -> Self {
+        Ann {
+            conf: 0.0,
+            prov: BTreeSet::new(),
+        }
+    }
+
+    fn times(&self, other: &Self) -> Self {
+        self.join(other)
+    }
+
+    fn plus(&self, other: &Self) -> Self {
+        Ann {
+            conf: self.conf.max(other.conf),
+            prov: self.prov.union(&other.prov).cloned().collect(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.conf == 0.0
+    }
+
+    fn render(&self) -> String {
+        let prov: Vec<&String> = self.prov.iter().collect();
+        format!("(conf {:.3}, prov {prov:?})", self.conf)
+    }
+}
+
+/// Today's reading: the confidence component, straight out.
+impl Interpret<f64> for Ann {
+    fn interpret(&self) -> f64 {
+        self.conf
+    }
+}
+
 pub type Key = (String, Vec<Value>);
 
 /// One event in the streaming change feed. Downstream projections (e.g. a
@@ -77,23 +237,23 @@ pub enum Support {
 }
 
 #[derive(Debug, Clone)]
-pub struct StoredFact {
-    pub ann: Ann,
+pub struct StoredFact<A = Ann> {
+    pub ann: A,
     pub supports: Vec<Support>,
 }
 
 #[derive(Debug, Clone)]
-pub struct Row {
+pub struct Row<A = Ann> {
     pub key: Vec<Value>,
-    pub fact: StoredFact,
+    pub fact: StoredFact<A>,
 }
 
 /// A predicate's tuple set: rows in insertion order, with a key map for
 /// dedup and lazy per-position secondary indexes whose lookups return row
 /// ids (cheap) instead of cloned keys.
-#[derive(Debug, Default, Clone)]
-pub struct Relation {
-    pub rows: Vec<Row>,
+#[derive(Debug, Clone)]
+pub struct Relation<A = Ann> {
+    pub rows: Vec<Row<A>>,
     by_key: HashMap<Vec<Value>, usize>,
     /// position -> value -> row ids
     idx: HashMap<usize, HashMap<Value, Vec<usize>>>,
@@ -106,14 +266,24 @@ pub struct Relation {
 /// duplicate emissions quadratic in memory and scan time.
 pub const SUPPORT_CAP: usize = 4;
 
-impl Relation {
+impl<A> Default for Relation<A> {
+    fn default() -> Self {
+        Relation {
+            rows: Vec::new(),
+            by_key: HashMap::new(),
+            idx: HashMap::new(),
+            pending: BTreeSet::new(),
+        }
+    }
+}
+
+impl<A: Annotation> Relation<A> {
     /// Insert or merge. Returns true if the fact is new.
-    fn insert(&mut self, args: Vec<Value>, f: StoredFact) -> bool {
+    fn insert(&mut self, args: Vec<Value>, f: StoredFact<A>) -> bool {
         if let Some(&id) = self.by_key.get(&args) {
             let existing = &mut self.rows[id].fact;
-            // lattice-merge annotations: max confidence, union provenance
-            existing.ann.conf = existing.ann.conf.max(f.ann.conf);
-            existing.ann.prov.extend(f.ann.prov);
+            // lattice-merge annotations: the semiring sum
+            existing.ann = existing.ann.plus(&f.ann);
             if existing.supports.len() < SUPPORT_CAP {
                 for s in f.supports {
                     if existing.supports.len() >= SUPPORT_CAP {
@@ -229,11 +399,10 @@ impl Relation {
 
     /// If the fact exists, merge annotations and record the support while
     /// under the witness cap; returns true (existing) either way.
-    pub fn merge_ann(&mut self, args: &[Value], ann: &Ann, support: Support) -> bool {
+    pub fn merge_ann(&mut self, args: &[Value], ann: &A, support: Support) -> bool {
         if let Some(&id) = self.by_key.get(args) {
             let existing = &mut self.rows[id].fact;
-            existing.ann.conf = existing.ann.conf.max(ann.conf);
-            existing.ann.prov.extend(ann.prov.iter().cloned());
+            existing.ann = existing.ann.plus(ann);
             if existing.supports.len() < SUPPORT_CAP
                 && !existing.supports.contains(&support)
             {
@@ -245,7 +414,7 @@ impl Relation {
         }
     }
 
-    pub fn get(&self, args: &[Value]) -> Option<&StoredFact> {
+    pub fn get(&self, args: &[Value]) -> Option<&StoredFact<A>> {
         self.by_key.get(args).map(|&id| &self.rows[id].fact)
     }
 
@@ -261,30 +430,30 @@ impl Relation {
 
 // ------------------------------------------------------------- environment
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 /// Backtracking environment with an undo trail (WAM-style): bindings are
 /// recorded so a join can undo them on backtrack instead of cloning the
 /// whole environment per candidate.
-struct Env {
+struct Env<A> {
     map: HashMap<String, Value>,
-    ann: Ann,
+    ann: A,
     body_keys: Vec<Key>,
     trail: Vec<(String, Option<Value>)>,
 }
 
 /// A backtrack point: trail length, body-key length, annotation snapshot.
 #[derive(Clone)]
-struct Mark {
+struct Mark<A> {
     trail: usize,
     body: usize,
-    ann: Ann,
+    ann: A,
 }
 
-impl Env {
+impl<A: Annotation> Env<A> {
     fn new() -> Self {
         Env {
             map: HashMap::new(),
-            ann: Ann::unit(),
+            ann: A::one(),
             body_keys: Vec::new(),
             trail: Vec::new(),
         }
@@ -295,7 +464,7 @@ impl Env {
         self.map.insert(v.to_string(), val);
     }
 
-    fn mark(&self) -> Mark {
+    fn mark(&self) -> Mark<A> {
         Mark {
             trail: self.trail.len(),
             body: self.body_keys.len(),
@@ -303,7 +472,7 @@ impl Env {
         }
     }
 
-    fn undo(&mut self, m: &Mark) {
+    fn undo(&mut self, m: &Mark<A>) {
         while self.trail.len() > m.trail {
             let (v, old) = self.trail.pop().unwrap();
             match old {
@@ -327,9 +496,9 @@ impl Env {
     }
 }
 
-pub struct Engine {
+pub struct Engine<A = Ann> {
     pub interner: Interner,
-    pub relations: HashMap<String, Relation>,
+    pub relations: HashMap<String, Relation<A>>,
     pub clauses: Vec<Clause>,
     pub now: i64,
     /// Facts derived by the most recent ask_deep (demand-slice size).
@@ -372,8 +541,22 @@ impl std::fmt::Display for StratError {
 }
 impl std::error::Error for StratError {}
 
-impl Engine {
+impl Engine<Ann> {
+    /// The default engine: confidence t-norm x provenance set.
+    ///
+    /// Deliberately NOT on the generic impl. A struct's default type
+    /// parameter is not applied in expression position, so a generic
+    /// `new()` turns every bare `let e = Engine::new();` into an inference
+    /// error. Keeping the constructor concrete keeps every existing caller
+    /// compiling untouched; a different annotation is built with
+    /// `Engine::<T>::default()`.
     pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<A: Annotation> Default for Engine<A> {
+    fn default() -> Self {
         Engine {
             interner: Interner::new(),
             relations: HashMap::new(),
@@ -392,11 +575,13 @@ impl Engine {
             retracted: BTreeSet::new(),
         }
     }
+}
 
+impl<A: Annotation> Engine<A> {
     // ------------------------------------------------------------- EDB API
 
     /// Assert a base fact with confidence and provenance.
-    pub fn declare(&mut self, pred: &str, args: &[Value], ann: Ann) -> bool {
+    pub fn declare(&mut self, pred: &str, args: &[Value], ann: A) -> bool {
         let rel = self.relations.entry(pred.to_string()).or_default();
         let is_new = rel.insert(
             args.to_vec(),
@@ -441,7 +626,7 @@ impl Engine {
         let log_mark = self.change_log.len();
 
         for (pred, args) in extra {
-            self.declare(pred, args, Ann::unit());
+            self.declare(pred, args, A::one());
         }
         self.run();
         self.last_hypothetical_facts = self.change_log.len() - log_mark;
@@ -733,7 +918,7 @@ impl Engine {
             .collect();
         for c in &fact_clauses {
             if let Some(args) = self.ground_args(&c.head.args) {
-                self.declare(&c.head.pred, &args, Ann::unit());
+                self.declare(&c.head.pred, &args, A::one());
             }
         }
 
@@ -1053,10 +1238,13 @@ impl Engine {
                 .iter()
                 .filter(|t| !matches!(t, Term::Agg(..)))
                 .count();
-            let mut g: std::collections::BTreeMap<Vec<Value>, Vec<Vec<Value>>> = Default::default();
+            let mut g: std::collections::BTreeMap<Vec<Value>, (Vec<Vec<Value>>, Vec<A>)> =
+                Default::default();
             for row in &rel.rows {
                 let key = row.key[..group_len].to_vec();
-                g.entry(key).or_default().push(row.key[group_len..].to_vec());
+                let e = g.entry(key).or_insert_with(|| (Vec::new(), Vec::new()));
+                e.0.push(row.key[group_len..].to_vec());
+                e.1.push(row.fact.ann.clone());
             }
             g
         };
@@ -1070,7 +1258,7 @@ impl Engine {
             })
             .collect();
         let mut changed = 0usize;
-        for (g, rows) in groups {
+        for (g, (rows, row_anns)) in groups {
             let mut out = g.clone();
             for (ai, f) in fns.iter().enumerate() {
                 let vals: Vec<i64> = rows
@@ -1135,7 +1323,7 @@ impl Engine {
                     .insert(
                         out.clone(),
                         StoredFact {
-                            ann: Ann::unit(),
+                            ann: A::aggregate(row_anns.iter()),
                             supports: vec![support],
                         },
                     );
@@ -1150,7 +1338,7 @@ impl Engine {
     }
 
     /// Read-only iteration over (predicate, relation).
-    pub fn relations_iter(&self) -> impl Iterator<Item = (&String, &Relation)> {
+    pub fn relations_iter(&self) -> impl Iterator<Item = (&String, &Relation<A>)> {
         self.relations.iter()
     }
 
@@ -1346,7 +1534,7 @@ impl Engine {
                 None => continue,
             };
             let mut env = Env::new();
-            env.ann = Ann::unit().join(&ann);
+            env.ann = A::one().times(&ann);
             env.body_keys = vec![(atom.pred.clone(), k.clone())];
             if !self.bind_args(&atom.args, &k, &mut env) {
                 continue;
@@ -1355,7 +1543,7 @@ impl Engine {
         }
     }
 
-    fn solve_builtin_only(&mut self, clause: &Clause) -> Option<Env> {
+    fn solve_builtin_only(&mut self, clause: &Clause) -> Option<Env<A>> {
         let mut env = Env::new();
         let mut out = Vec::new();
         // reuse solve_rest with skip = None; it emits heads too, so instead
@@ -1378,7 +1566,7 @@ impl Engine {
         clause: &Clause,
         i: usize,
         skip: Option<usize>,
-        env: &mut Env,
+        env: &mut Env<A>,
         out: &mut Vec<Key>,
     ) -> bool {
         self.solve_all(clause, i, skip.unwrap_or(usize::MAX), env, out)
@@ -1389,7 +1577,7 @@ impl Engine {
         clause: &Clause,
         i: usize,
         skip: usize,
-        env: &mut Env,
+        env: &mut Env<A>,
         out: &mut Vec<Key>,
     ) -> bool {
         if i == clause.body.len() {
@@ -1424,7 +1612,7 @@ impl Engine {
                         (row.key.clone(), row.fact.ann.clone())
                     };
                     let mark = env.mark();
-                    env.ann = env.ann.join(&ann);
+                    env.ann = env.ann.times(&ann);
                     env.body_keys.push((atom.pred.clone(), k.clone()));
                     if self.bind_args(&atom.args, &k, env)
                         && self.solve_all(clause, i + 1, skip, env, out)
@@ -1439,10 +1627,21 @@ impl Engine {
             Lit::Neg(atom) => {
                 // negation-as-absence against the full relation; the stratum
                 // is already complete for lower-stratum predicates
-                if self.matches_any(atom, env) {
+                // Negation is the one site where an annotation can change which
+                // facts EXIST, so it goes through the trait rather than through a
+                // bare existence test. The default `negate` reproduces
+                // negation-as-absence exactly: a match yields `zero()`, which
+                // prunes here just as `return false` did, and an absence yields
+                // `one()`, which multiplies away.
+                let factor = A::negate(self.match_ann(atom, env).as_ref());
+                if factor.is_zero() {
                     return false;
                 }
-                self.solve_all(clause, i + 1, skip, env, out)
+                let mark = env.mark();
+                env.ann = env.ann.times(&factor);
+                let any = self.solve_all(clause, i + 1, skip, env, out);
+                env.undo(&mark);
+                any
             }
             Lit::Now(t) => match t {
                 Term::Wildcard => self.solve_all(clause, i + 1, skip, env, out),
@@ -1526,7 +1725,7 @@ impl Engine {
     /// Resolve a pattern's terms against env into concrete bound values
     /// (None = unbound). Unknown symbols resolve to a sentinel that matches
     /// nothing, so lookups short-circuit.
-    fn resolve_bound(&self, pat: &[Term], env: &Env) -> Vec<Option<Value>> {
+    fn resolve_bound(&self, pat: &[Term], env: &Env<A>) -> Vec<Option<Value>> {
         pat.iter()
             .map(|t| match t {
                 Term::Int(i) => Some(Value::Int(*i)),
@@ -1541,23 +1740,26 @@ impl Engine {
             .collect()
     }
 
-    fn matches_any(&self, atom: &crate::ast::Atom, env: &Env) -> bool {
+    /// The annotation of the first fact matching `atom` under `env`, or
+    /// `None` for an absence. Was `matches_any -> bool`; a negated literal
+    /// now needs the matching annotation, not just its existence.
+    fn match_ann(&self, atom: &crate::ast::Atom, env: &Env<A>) -> Option<A> {
         let bound = self.resolve_bound(&atom.args, env);
         let ids = match self.relations.get(&atom.pred) {
             Some(rel) => rel.lookup(&bound),
-            None => return false,
+            None => return None,
         };
         for id in ids {
             let k = self.relations[&atom.pred].rows[id].key.clone();
             let mut e = env.clone();
             if self.bind_args(&atom.args, &k, &mut e) {
-                return true;
+                return Some(self.relations[&atom.pred].rows[id].fact.ann.clone());
             }
         }
-        false
+        None
     }
 
-    fn resolve_term(&self, t: &Term, env: &Env) -> Option<Value> {
+    fn resolve_term(&self, t: &Term, env: &Env<A>) -> Option<Value> {
         match t {
             Term::Var(_) => env.lookup(t),
             Term::Int(i) => Some(Value::Int(*i)),
@@ -1567,7 +1769,7 @@ impl Engine {
         }
     }
 
-    fn bind_args(&self, pat: &[Term], args: &[Value], env: &mut Env) -> bool {
+    fn bind_args(&self, pat: &[Term], args: &[Value], env: &mut Env<A>) -> bool {
         if pat.len() != args.len() {
             return false;
         }
@@ -1603,7 +1805,7 @@ impl Engine {
             .collect()
     }
 
-    fn emit_head(&mut self, clause: &Clause, env: &Env) -> Option<Key> {
+    fn emit_head(&mut self, clause: &Clause, env: &Env<A>) -> Option<Key> {
         let mut args = Vec::with_capacity(clause.head.args.len());
         for t in &clause.head.args {
             let v = match t {
@@ -1615,16 +1817,20 @@ impl Engine {
             };
             args.push(v);
         }
+        let rule = clause
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("rule/{}", clause.head.pred));
+        // stamp the body product with this derivation's identity before it is
+        // summed into the head; the default impl is a no-op
+        let ann = env.ann.clone().derive(&rule, &env.body_keys);
         let support = Support::Rule {
-            rule: clause
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("rule/{}", clause.head.pred)),
+            rule,
             body: env.body_keys.clone(),
         };
         // fast path: duplicate emission — merge + capped witness recording
         if let Some(rel) = self.relations.get_mut(&clause.head.pred) {
-            if rel.merge_ann(&args, &env.ann, support.clone()) {
+            if rel.merge_ann(&args, &ann, support.clone()) {
                 return None;
             }
         }
@@ -1633,7 +1839,7 @@ impl Engine {
         let is_new = rel.insert(
             key.1.clone(),
             StoredFact {
-                ann: env.ann.clone(),
+                ann,
                 supports: vec![support],
             },
         );
@@ -1652,7 +1858,7 @@ impl Engine {
     /// Query a predicate with a pattern; `None` slots are wildcards.
     /// Index-aware: bound positions select the smallest bucket instead of
     /// scanning the relation.
-    pub fn query(&self, pred: &str, pattern: &[Option<Value>]) -> Vec<(Vec<Value>, Ann)> {
+    pub fn query(&self, pred: &str, pattern: &[Option<Value>]) -> Vec<(Vec<Value>, A)> {
         let mut out = Vec::new();
         let Some(rel) = self.relations.get(pred) else {
             return out;
@@ -1678,7 +1884,7 @@ impl Engine {
         out
     }
 
-    pub fn fact(&self, pred: &str, args: &[Value]) -> Option<StoredFact> {
+    pub fn fact(&self, pred: &str, args: &[Value]) -> Option<StoredFact<A>> {
         self.relations.get(pred).and_then(|r| r.get(args)).cloned()
     }
 
@@ -1860,12 +2066,7 @@ impl Engine {
             let _ = writeln!(out, "{pad}{rendered}  [cycle: shown above]");
             return;
         }
-        let prov: Vec<&String> = f.ann.prov.iter().collect();
-        let _ = writeln!(
-            out,
-            "{pad}{rendered}  (conf {:.3}, prov {prov:?})",
-            f.ann.conf
-        );
+        let _ = writeln!(out, "{pad}{rendered}  {}", f.ann.render());
         // render one witness derivation per distinct rule (further
         // witnesses of the same rule add no explanatory power)
         let mut shown_rules: BTreeSet<&str> = BTreeSet::new();
@@ -1904,7 +2105,7 @@ impl Engine {
 /// variable: returns (coeff, const, Some(var)) where expr = coeff*var+const,
 /// or (0, value, None) when fully bound. None when not linear / two unbound
 /// variables / symbol-typed.
-fn linearize(e: &crate::ast::Expr, env: &Env) -> Option<(i64, i64, Option<String>)> {
+fn linearize<A>(e: &crate::ast::Expr, env: &Env<A>) -> Option<(i64, i64, Option<String>)> {
     use crate::ast::Expr;
     match e {
         Expr::T(Term::Int(i)) => Some((0, *i, None)),

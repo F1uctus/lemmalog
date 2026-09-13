@@ -48,10 +48,10 @@ pub use scenario::{run_eval, EvalReport, Scenario};
 pub use retrieval::{Bm25, Retrieval, Selection};
 pub use semantics::{Embedder, HashEmbedder, SemanticIndex, RELEVANCE_RULES};
 pub use ast::{parse_program, ParseError};
-pub use eval::{Ann, Change, Engine, StoredFact, StratError};
+pub use eval::{Ann, Annotation, Change, Engine, Interpret, StoredFact, StratError};
 pub use intern::{Interner, Term, Value};
 
-impl Engine {
+impl<A: Annotation> Engine<A> {
     /// Install (append) a rule program. Rules are identified by optional
     /// `name:` prefixes; unnamed rules get `rule/<head-pred>` labels used in
     /// `why()` output.

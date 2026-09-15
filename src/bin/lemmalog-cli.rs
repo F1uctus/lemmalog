@@ -43,9 +43,9 @@ fn load(path: &str) -> AgentMemory<MockExtractor> {
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| {
-        args.get(i + 1).cloned().filter(|v| !v.starts_with("--"))
-    })
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned().filter(|v| !v.starts_with("--")))
 }
 
 fn stdin_or_flag(args: &[String], name: &str) -> String {
@@ -71,7 +71,10 @@ fn main() {
             m.save(&snap_path()).expect("save snapshot");
             println!(
                 "added={} updated={} noop={} escalations={}",
-                report.added, report.updated, report.noop, report.escalations.len()
+                report.added,
+                report.updated,
+                report.noop,
+                report.escalations.len()
             );
             for d in dropped.iter().take(5) {
                 println!("dropped: {} ({})", d.0, d.1);

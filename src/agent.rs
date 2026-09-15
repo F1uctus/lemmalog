@@ -10,8 +10,9 @@
 //! mitigation) under a token budget.
 
 use crate::eval::{Ann, Engine};
-use crate::intern::Value;
 use crate::intern::Term;
+use crate::intern::Value;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -93,8 +94,8 @@ fn entity_token_problem(s: &str) -> Option<String> {
     // unresolved-reference words: pronouns and role placeholders that mean
     // the model failed to resolve the entity
     const BLOCKED: [&str; 14] = [
-        "i", "me", "my", "mine", "speaker", "user", "they", "them", "he", "she",
-        "it", "we", "you", "that",
+        "i", "me", "my", "mine", "speaker", "user", "they", "them", "he", "she", "it", "we", "you",
+        "that",
     ];
     let lower = s.to_lowercase();
     if s.is_empty() {
@@ -255,8 +256,12 @@ pub fn parse_protocol_reported(
 /// The model is asked to answer in the line protocol `S --rel--> O`
 /// (optionally `S --rel[0.8]--> O`). Extraction failures degrade to zero
 /// facts rather than poisoning memory.
+/// The model call an [`LlmExtractor`] drives: a prompt in, the model's raw
+/// reply or an error message out.
+type LlmCall = Box<dyn FnMut(&str) -> Result<String, String>>;
+
 pub struct LlmExtractor {
-    call: Box<dyn FnMut(&str) -> Result<String, String>>,
+    call: LlmCall,
     default_confidence: f64,
     seen: HashMap<String, Vec<CandidateFact>>,
     pub calls: usize, // observability for tests/metrics
@@ -446,11 +451,8 @@ impl<X: Extractor> AgentMemory<X> {
             // same fact re-observed: merge annotation, no structural change
             let mut k = open[0].clone();
             k[2] = obj;
-            self.engine.declare(
-                "edge",
-                &k,
-                Ann::base(c.confidence, [ep.id.clone()]),
-            );
+            self.engine
+                .declare("edge", &k, Ann::base(c.confidence, [ep.id.clone()]));
             report.noop += 1;
             return;
         }
@@ -461,25 +463,42 @@ impl<X: Extractor> AgentMemory<X> {
         // (without this, status(H, supported) left status(H, proposed)
         // open too — both "true" at once)
         const MULTI: [&str; 15] = [
-            "evidence", "mentions", "located", "describes", "tag",
-            "related_to", "depends_on", "owns", "calls", "part_of",
-            "source", "cites", "symptom_of", "aka", "alias_of",
+            "evidence",
+            "mentions",
+            "located",
+            "describes",
+            "tag",
+            "related_to",
+            "depends_on",
+            "owns",
+            "calls",
+            "part_of",
+            "source",
+            "cites",
+            "symptom_of",
+            "aka",
+            "alias_of",
         ];
         const FUNCTIONAL: [&str; 7] = [
-            "status", "phone", "address", "email", "version", "value_of",
+            "status",
+            "phone",
+            "address",
+            "email",
+            "version",
+            "value_of",
             "current_value",
         ];
         let pred_name = self.engine.interner.display(&pred).to_string();
         let multi = MULTI.iter().any(|m| pred_name.starts_with(m));
         let functional = FUNCTIONAL.iter().any(|f| pred_name.starts_with(f));
-        let exclusive = functional
-            || !self.engine.query("exclusive", &[Some(pred)]).is_empty();
+        let exclusive = functional || !self.engine.query("exclusive", &[Some(pred)]).is_empty();
         if exclusive && !multi {
             for old in &open {
                 let mut closed = old.clone();
                 closed[4] = Value::Int(self.engine.now);
                 self.engine.retract("edge", old);
-                self.engine.declare("edge", &closed, Ann::base(0.9, ["superseded"]));
+                self.engine
+                    .declare("edge", &closed, Ann::base(0.9, ["superseded"]));
             }
             self.assert_open(&[subj, pred, obj], c.confidence, &ep.id);
             report.updated += 1;
@@ -494,7 +513,12 @@ impl<X: Extractor> AgentMemory<X> {
                 .collect();
             report.escalations.push(format!(
                 "conflict: {} --{}--> {} asserted in {}, but {} also open ({})",
-                c.subj, c.pred, c.obj, ep.id, c.pred, others.join(", ")
+                c.subj,
+                c.pred,
+                c.obj,
+                ep.id,
+                c.pred,
+                others.join(", ")
             ));
             report.added += 1;
         }
@@ -633,7 +657,8 @@ impl<X: Extractor> AgentMemory<X> {
         session: crate::intern::Value,
         entity: crate::intern::Value,
     ) -> Vec<(Vec<crate::intern::Value>, crate::eval::Ann)> {
-        self.engine.query("near", &[Some(session), Some(entity), None])
+        self.engine
+            .query("near", &[Some(session), Some(entity), None])
     }
 
     /// Demand-driven query (magic sets): answers without materializing the
@@ -700,10 +725,7 @@ impl<X: Extractor> AgentMemory<X> {
     /// (retracted lines, not-found lines, derived facts that died) —
     /// the consequence report is the point: the caller sees exactly
     /// what invalidation propagated.
-    pub fn retract_facts(
-        &mut self,
-        text: &str,
-    ) -> (Vec<String>, Vec<String>, Vec<String>) {
+    pub fn retract_facts(&mut self, text: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
         let candidates = parse_protocol_strict(text, 0.9);
         let mut done = Vec::new();
         let mut missing = Vec::new();
@@ -716,7 +738,10 @@ impl<X: Extractor> AgentMemory<X> {
             };
             let open: Vec<Vec<Value>> = self
                 .engine
-                .query("edge", &[Some(subj), Some(pred), Some(obj), None, None, None])
+                .query(
+                    "edge",
+                    &[Some(subj), Some(pred), Some(obj), None, None, None],
+                )
                 .into_iter()
                 .map(|(k, _)| k)
                 .filter(|k| matches!(k[4].as_int(), Some(vt) if vt == i64::MAX))
@@ -842,7 +867,10 @@ impl<X: Extractor> AgentMemory<X> {
                 }
                 let subj = self.engine.interner.display(&key[0]).to_string();
                 let rel = self.engine.interner.display(&key[1]).to_string();
-                let line = format!("{subj} --{rel}--> {}", self.engine.interner.display(&key[2]));
+                let line = format!(
+                    "{subj} --{rel}--> {}",
+                    self.engine.interner.display(&key[2])
+                );
                 if !crate::retrieval::tokens3(&line)
                     .iter()
                     .any(|t| t.len() >= 3 && qt.contains(t))
@@ -866,16 +894,16 @@ impl<X: Extractor> AgentMemory<X> {
                 if lines >= 8 {
                     break;
                 }
-                vals.sort_by(|a, b| b.0.cmp(&a.0));
-                let distinct: Vec<String> = vals
-                    .iter()
-                    .map(|(_, v)| v.clone())
-                    .fold(Vec::new(), |mut acc: Vec<String>, v| {
+                vals.sort_by_key(|v| Reverse(v.0));
+                let distinct: Vec<String> = vals.iter().map(|(_, v)| v.clone()).fold(
+                    Vec::new(),
+                    |mut acc: Vec<String>, v| {
                         if !acc.contains(&v) {
                             acc.push(v);
                         }
                         acc
-                    });
+                    },
+                );
                 if distinct.len() < 2 {
                     continue;
                 }
@@ -912,9 +940,13 @@ pub fn assemble_context(
         let v = engine.sym_of(name);
         relevant.extend(engine.query("current", &[Some(v), None, None]));
     }
-    relevant.sort_by(|a, b| b.1.conf.partial_cmp(&a.1.conf).unwrap_or(std::cmp::Ordering::Equal));
+    relevant.sort_by(|a, b| {
+        b.1.conf
+            .partial_cmp(&a.1.conf)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    let distilled_budget = (budget_tokens * 4 * 6 / 10).max(0);
+    let distilled_budget = budget_tokens * 4 * 6 / 10;
     let mut distilled = String::new();
     let mut used_prov: Vec<String> = Vec::new();
     for (k, ann) in &relevant {
@@ -933,7 +965,7 @@ pub fn assemble_context(
         used_prov.extend(ann.prov.iter().cloned());
     }
 
-    let source_budget = (budget_tokens * 4 * 4 / 10).max(0);
+    let source_budget = budget_tokens * 4 * 4 / 10;
     let mut sources = String::new();
     let mut used: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for ep in episodes {
@@ -1077,7 +1109,14 @@ impl<X: Extractor> AgentMemory<X> {
                 continue;
             }
             for row in &rel.rows {
-                let prov = row.fact.ann.prov.iter().cloned().collect::<Vec<_>>().join(",");
+                let prov = row
+                    .fact
+                    .ann
+                    .prov
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let args = row
                     .key
                     .iter()
@@ -1100,10 +1139,7 @@ impl<X: Extractor> AgentMemory<X> {
     /// Load a snapshot into a fresh memory with the given extractor.
     /// Base facts are re-asserted with their annotations; derived
     /// relations are rebuilt by one maintenance run.
-    pub fn load(
-        extractor: X,
-        path: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(extractor: X, path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let text = std::fs::read_to_string(path)?;
         let mut lines = text.lines();
         let magic = lines.next();

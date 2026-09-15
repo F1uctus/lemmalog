@@ -458,10 +458,14 @@ fn tool_call(state: &mut State, name: &str, args: &J, path: Option<&str>) -> Res
         "lemmalog_install_rules" => {
             let rules = args["rules"].as_str().unwrap_or_default();
             sync_clock(state);
-            match engine_of(state).install_program(rules) {
+            match state.memory.install_rules(rules) {
                 Ok(id) => {
                     let n = engine_of(state).run();
-                    Ok(format!("installed {id}; backfill derived +{n} facts"))
+                    let mut out = format!("installed {id}; backfill derived +{n} facts");
+                    for w in state.memory.batch_conflicts(&id) {
+                        out.push_str(&format!("\nWARNING: {w}"));
+                    }
+                    Ok(out)
                 }
                 Err(e) => Err(format!(
                     "rules rejected — nothing installed:\n{e}\ncommon causes: recursion through negation; aggregates outside rule heads; parse errors (rules end with '.')"

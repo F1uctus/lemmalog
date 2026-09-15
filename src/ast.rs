@@ -361,7 +361,14 @@ impl Parser {
                     .next()
                     .map(|c| c.is_ascii_uppercase())
                     .unwrap_or(false)
+                    || (s.starts_with('_')
+                        && s.chars().nth(1).map(|c| c.is_ascii_uppercase()).unwrap_or(false))
                 {
+                    // `_Y` is the Prolog named-don't-care convention: a
+                    // variable, not a constant — parsing it as a symbol
+                    // made every rule using one silently derive nothing.
+                    // `_foo` (lowercase after the underscore) stays a
+                    // constant.
                     Ok(Term::Var(s))
                 }
                 // aggregate terms: count(X) / min(X) / max(X) / sum(X)

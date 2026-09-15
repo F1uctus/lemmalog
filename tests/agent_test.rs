@@ -597,3 +597,37 @@ fn quoted_objects_parse_to_clean_symbols() {
     let bad = "hyp_1 --hypothesis--> \"unclosed claim about things";
     assert!(lemmalog::agent::parse_protocol_strict(bad, 0.9).is_empty());
 }
+
+#[test]
+fn underscore_prefixed_variables_parse_as_variables() {
+    // issue #6: `_Y` (Prolog named don't-care) parsed as a constant, so
+    // rules using it silently derived nothing; `_foo` stays a constant
+    let mut m = AgentMemory::<MockExtractor>::new(MockExtractor::new(0.9), "").unwrap();
+    m.observe_extracted("n0 --requires--> m0\nn1 --requires--> m1", 100);
+    m.maintain(100);
+    m.install_rules("interior(X) :- current(X, \"requires\", _Y).").unwrap();
+    m.maintain(100);
+    assert_eq!(m.ask("interior(X)").unwrap().len(), 2, "_Y is a variable");
+    m.install_rules("tagged(X) :- current(X, \"requires\", _foo).").unwrap();
+    m.maintain(100);
+    // `_foo` is a constant that matches nothing: still derives nothing
+    assert_eq!(m.ask("tagged(X)").unwrap().len(), 0, "_foo stays a constant");
+}
+
+#[test]
+fn installing_a_shadow_rule_warns_about_union() {
+    // issue #7: installing a "corrected" rule without uninstalling the old
+    // one keeps both active (union); the response must say so
+    let mut m = AgentMemory::<MockExtractor>::new(MockExtractor::new(0.9), "").unwrap();
+    m.observe_extracted("n0 --requires--> m0", 100);
+    m.maintain(100);
+    let b1 = m.install_rules("dep(A, B) :- current(A, \"requires\", B).").unwrap();
+    assert!(m.batch_conflicts(&b1).is_empty(), "first install is clean");
+    let b2 = m
+        .install_rules("dep(A, B) :- current(A, \"requires\", B), current(A, \"keep\", yes).")
+        .unwrap();
+    let warns = m.batch_conflicts(&b2);
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(warns[0].contains("dep is also defined by batch(es) b"), "{warns:?}");
+    assert!(warns[0].contains("UNION"), "{warns:?}");
+}

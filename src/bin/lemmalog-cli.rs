@@ -134,6 +134,9 @@ fn main() {
                     let n = m.maintain(m.engine.now);
                     m.save(&snap_path()).expect("save snapshot");
                     println!("installed {id}; backfill derived +{n} facts");
+                    for w in m.batch_conflicts(&id) {
+                        println!("WARNING: {w}");
+                    }
                 }
                 Err(e) => {
                     eprintln!("install: {e}");

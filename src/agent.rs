@@ -594,6 +594,53 @@ impl<X: Extractor> AgentMemory<X> {
         self.engine.install_program(src)
     }
 
+    /// Predicates this batch (co-)defines that another installed batch
+    /// ALSO defines. Datalog union semantics keep both rules active, so
+    /// installing a "corrected" rule without uninstalling the old one
+    /// silently preserves the old derivations — this makes the
+    /// shadow-definition visible at install time instead.
+    pub fn batch_conflicts(&self, id: &str) -> Vec<String> {
+        let batches = &self.engine.rule_batches;
+        let Some(pos) = batches.iter().position(|(b, _, _)| b == id) else {
+            return Vec::new();
+        };
+        // clause ranges: [prev_end, end) per batch (0 for the first)
+        let ends: Vec<usize> = batches.iter().map(|(_, _, e)| *e).collect();
+        let lo = |i: usize| -> usize {
+            if i == 0 {
+                0
+            } else {
+                ends[i - 1]
+            }
+        };
+        let head_preds = |rng: std::ops::Range<usize>| -> Vec<String> {
+            self.engine.clauses[rng]
+                .iter()
+                .filter(|c| !c.is_fact)
+                .map(|c| c.head.pred.clone())
+                .collect()
+        };
+        let mine: Vec<String> = head_preds(lo(pos)..ends[pos]);
+        let mut out = Vec::new();
+        for p in &mine {
+            let co_definers: Vec<String> = batches
+                .iter()
+                .enumerate()
+                .filter(|(i, (b, _, _))| {
+                    *i != pos && *b != id && head_preds(lo(*i)..ends[*i]).contains(p)
+                })
+                .map(|(_, (b, _, _))| b.clone())
+                .collect();
+            if !co_definers.is_empty() {
+                out.push(format!(
+                    "{p} is also defined by batch(es) {} — the definitions UNION; uninstall those if this was a replacement",
+                    co_definers.join(", ")
+                ));
+            }
+        }
+        out
+    }
+
     /// Agent tool surface: uninstall a rule batch; derivations revert on
     /// the next `maintain()`.
     pub fn uninstall_rules(&mut self, id: &str) -> bool {

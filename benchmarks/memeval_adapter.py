@@ -17,10 +17,12 @@ from openai import OpenAI
 
 from agents_memory.systems._helpers import _qa_results
 
-BIN = os.environ.get(
-    "LEMMALOG_BENCH",
-    "/Users/jordy/brainlog/target/release/lemmalog-bench",
-)
+BIN = os.environ.get("LEMMALOG_BENCH", "")
+if not BIN or not os.path.exists(BIN):
+    raise RuntimeError(
+        "set LEMMALOG_BENCH to the lemmalog-bench binary "
+        "(build with: cargo build --release --features llm,mcp --bin lemmalog-bench)"
+    )
 CACHE = os.environ.get("LEMMALOG_CACHE_DIR", "/tmp/locomo-cache-v2")
 SNAPS = os.environ.get("LEMMALOG_SNAP_DIR", "/tmp/locomo-snaps-v2")
 

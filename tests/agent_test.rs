@@ -158,21 +158,14 @@ fn llm_extractor_pluggable_and_memoized() {
         m.engine.sym("works_at"),
         m.engine.sym("acme"),
     );
-    let f = m
-        .engine
-        .fact(
-            "edge",
-            &[
-                a,
-                wa,
-                ac,
-                Value::Int(100),
-                Value::Int(i64::MAX),
-                Value::Int(100),
-            ],
-        )
-        .unwrap();
-    assert!((f.ann.conf - 0.7).abs() < 1e-9, "conf = {}", f.ann.conf);
+    // asserted_at is wall time now (the transaction clock), so look the
+    // row up by its stable positions and read the annotation off it
+    let rows = m.engine.query(
+        "edge",
+        &[Some(a), Some(wa), Some(ac), Some(Value::Int(100)), Some(Value::Int(i64::MAX)), None],
+    );
+    assert_eq!(rows.len(), 1);
+    assert!((rows[0].1.conf - 0.7).abs() < 1e-9, "conf = {}", rows[0].1.conf);
     // extraction errors degrade to zero facts, not poison
     // (checked via a second memory below)
     let mut m2 =
@@ -630,4 +623,42 @@ fn installing_a_shadow_rule_warns_about_union() {
     assert_eq!(warns.len(), 1, "{warns:?}");
     assert!(warns[0].contains("dep is also defined by batch(es) b"), "{warns:?}");
     assert!(warns[0].contains("UNION"), "{warns:?}");
+}
+
+#[test]
+fn bitemporal_stamp_and_belief_query() {
+    // the review's central finding: asserted_at was always a copy of
+    // valid_from, so "what did the store believe at T" was unanswerable
+    // while the docs claimed bitemporal. Now the write boundary stamps
+    // asserted_at from the wall clock, and believed/4 answers point-in-
+    // time knowledge — including "valid before known"
+    let mut m = AgentMemory::<MockExtractor>::new(MockExtractor::new(0.9), "").unwrap();
+    // backdated observe: the fact was true at ts=1000, learned now
+    m.observe_extracted("alice --works_at--> acme", 1000);
+    m.maintain(1000);
+    let rows = m.engine.relation_keys("edge");
+    let (vf, at) = match &rows[0][..] {
+        [.., Value::Int(vf), _, Value::Int(at)] => (*vf, *at),
+        _ => panic!("edge arity"),
+    };
+    assert_eq!(vf, 1000, "valid_from is the backdated ts");
+    assert!(at > 1_700_000_000, "asserted_at is wall time (unix seconds), got {at}");
+    assert!(at > vf, "the two clocks differ on a backdated write");
+    // point-in-time belief via ask_deep with T bound
+    let known_now = m
+        .ask_deep("believed(\"alice\", \"works_at\", O, 9999999999)")
+        .unwrap();
+    assert_eq!(known_now.len(), 1, "known after asserted_at");
+    // the money shot: between valid_from and asserted_at the fact was
+    // TRUE but NOT YET KNOWN — believed must exclude it
+    let mid = (vf + at) / 2;
+    let mid_belief = m
+        .ask_deep(&format!("believed(\"alice\", \"works_at\", O, {mid})"))
+        .unwrap();
+    assert!(mid_belief.is_empty(), "valid before known: {mid_belief:?}");
+    // and before valid_from it was neither true nor known
+    let early = m
+        .ask_deep("believed(\"alice\", \"works_at\", O, 999)")
+        .unwrap();
+    assert!(early.is_empty());
 }

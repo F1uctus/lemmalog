@@ -332,7 +332,7 @@ fullcontext (ours)   0.197   (10.6M)
 fullcontext (pub)    0.222   (10.6M)
 ```
 
-Binary accuracy 0.566 ± 0.009 (3 runs, gpt-4o judge). Per-category
+Binary accuracy 0.585 ± 0.005 (3 runs, gpt-4o judge). Per-category
 (single run, F1 / accuracy):
 
 ```

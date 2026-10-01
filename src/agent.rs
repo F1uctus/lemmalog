@@ -344,9 +344,25 @@ pub struct AgentMemory<X: Extractor> {
 pub const DEFAULT_RULES: &str = "\
 # temporal projection: what is true NOW
 current(E,R,O) :- edge(E,R,O,VF,VT,_), now(T), VF =< T, T < VT.
+# point-in-time belief: what the store KNEW at time T (a fact counts
+# only once its asserted_at has passed, even if it was valid earlier —
+# query with T bound, e.g. via ask_deep)
+believed(E,R,O,T) :- edge(E,R,O,VF,VT,AT), AT =< T, VF =< T, T < VT.
 # curated exclusivity table for the update policy
 exclusive(\"works_at\").
 ";
+
+/// The transaction clock: unix epoch seconds at the instant of the
+/// write. `valid_from` carries when a fact WAS true; `asserted_at`
+/// carries when the store LEARNED it — a backdated observe must put the
+/// backdated time in one and the wall time in the other, or "what did
+/// we believe last month" is unanswerable.
+pub fn wall_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 impl<X: Extractor> AgentMemory<X> {
     pub fn new(extractor: X, extra_rules: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -529,9 +545,9 @@ impl<X: Extractor> AgentMemory<X> {
             spo[0],
             spo[1],
             spo[2],
-            Value::Int(self.engine.now),
+            Value::Int(self.engine.now), // valid_from: when it was true
             Value::Int(i64::MAX),
-            Value::Int(self.engine.now),
+            Value::Int(wall_seconds()),   // asserted_at: when we learned it
         ];
         self.engine.declare("edge", &args, Ann::base(conf, [prov]));
     }
@@ -683,9 +699,9 @@ impl<X: Extractor> AgentMemory<X> {
                         self.engine.sym(&c.subj),
                         self.engine.sym(&c.pred),
                         obj,
-                        Value::Int(now),
+                        Value::Int(now),   // valid_from
                         Value::Int(i64::MAX),
-                        Value::Int(now),
+                        Value::Int(wall_seconds()), // asserted_at
                     ],
                 )
             })
